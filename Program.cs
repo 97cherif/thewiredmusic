@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using NAudio.Dsp;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
 
 static class Program
 {
@@ -25,7 +26,7 @@ class Tap : ISampleProvider
     public float[] Snap() { lock (l) { var c = new float[buf.Length]; for (int i = 0; i < c.Length; i++) c[i] = buf[(pos + i) % buf.Length]; return c; } }
 }
 
-class Track { public string Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Image Art; }
+class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Image Art; }
 
 class Wired : Form
 {
@@ -38,7 +39,7 @@ class Wired : Form
     const string DefLyr = "どこにいても\nみんなつながっている\n\nNo matter where you are,\neveryone is always connected.";
 
     readonly List<Track> pl = new(); int cur = -1, scroll;
-    WaveOutEvent wo; AudioFileReader rd; Tap tap;
+    WaveOutEvent wo; WaveStream rd; VolumeSampleProvider vsp; Tap tap; int gen;
     bool playing, shuf, rep, mute, crt = true, dragSeek, dragVol; float vol = .6f;
     readonly float[] bars = new float[48], sa = new float[300], sr = new float[300];
     string status = "NOT CONNECTED  -  drop files here or use File > Open";
@@ -94,17 +95,19 @@ class Wired : Form
     void Play(int i)
     {
         if (i < 0 || i >= pl.Count) return;
-        Stop(); cur = i;
+        Stop(); cur = i; ++gen;
+        { int v0 = (rPl.Height - 30) / 17; if (cur < scroll) scroll = cur; if (cur >= scroll + v0) scroll = cur - v0 + 1; }
+        if (pl[i].Url != null) { Tune(i, gen); return; }
         try
         {
-            rd = new AudioFileReader(pl[i].Path) { Volume = mute ? 0 : vol }; tap = new Tap(rd);
+            rd = Rd(pl[i].Path); vsp = new VolumeSampleProvider(rd.ToSampleProvider()) { Volume = mute ? 0 : vol }; tap = new Tap(vsp);
             wo = new WaveOutEvent(); wo.Init(tap.ToWaveProvider()); wo.Play(); playing = true;
             status = "Now Playing: " + pl[i].Artist + " - " + pl[i].Title;
         }
         catch (Exception ex) { status = "SIGNAL LOST: " + ex.Message; playing = false; }
         int vis = (rPl.Height - 30) / 17; if (cur < scroll) scroll = cur; if (cur >= scroll + vis) scroll = cur - vis + 1;
     }
-    void Stop() { wo?.Dispose(); rd?.Dispose(); wo = null; rd = null; tap = null; playing = false; }
+    void Stop() { wo?.Dispose(); rd?.Dispose(); wo = null; rd = null; vsp = null; tap = null; playing = false; }
     void Toggle()
     {
         if (wo == null) { Play(cur < 0 ? 0 : cur); return; }
@@ -112,7 +115,74 @@ class Wired : Form
     }
     void Next() { if (pl.Count == 0) return; Play(shuf ? new Random().Next(pl.Count) : (cur + 1) % pl.Count); }
     void Prev() { if (pl.Count == 0) return; if (rd != null && rd.CurrentTime.TotalSeconds > 3) rd.CurrentTime = TimeSpan.Zero; else Play((cur - 1 + pl.Count) % pl.Count); }
-    void Vol() { if (rd != null) rd.Volume = mute ? 0 : vol; }
+    void Vol() { if (vsp != null) vsp.Volume = mute ? 0 : vol; }
+    static WaveStream Rd(string s) => s.StartsWith("http") ? (WaveStream)new MediaFoundationReader(s) : new AudioFileReader(s);
+
+    // ---------- YouTube (via yt-dlp, downloaded automatically on first use) ----------
+    static async Task<string> Ytdlp(string args)
+    {
+        var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic");
+        Directory.CreateDirectory(dir); var exe = System.IO.Path.Combine(dir, "yt-dlp.exe");
+        if (!System.IO.File.Exists(exe))
+        {
+            using var h = new HttpClient();
+            System.IO.File.WriteAllBytes(exe, await h.GetByteArrayAsync("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"));
+        }
+        var psi = new System.Diagnostics.ProcessStartInfo(exe, args) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true, StandardOutputEncoding = System.Text.Encoding.UTF8 };
+        using var p = System.Diagnostics.Process.Start(psi);
+        var o = await p.StandardOutput.ReadToEndAsync(); await p.WaitForExitAsync(); return o;
+    }
+    static string Ask(string title)
+    {
+        using var f = new Form { Text = title, Width = 540, Height = 130, FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false, BackColor = PN, ForeColor = TX };
+        var tb = new TextBox { Left = 10, Top = 12, Width = 500 }; var ok = new Button { Text = "Connect", Left = 420, Top = 45, DialogResult = DialogResult.OK };
+        f.Controls.Add(tb); f.Controls.Add(ok); f.AcceptButton = ok;
+        return f.ShowDialog() == DialogResult.OK ? tb.Text.Trim() : null;
+    }
+    void OpenYt() { var u = Ask("Paste a YouTube video or playlist link"); if (!string.IsNullOrEmpty(u)) AddYt(u); }
+    async void AddYt(string url)
+    {
+        status = "Connecting to the Wired...";
+        try
+        {
+            var j = await Ytdlp($"-J --flat-playlist --no-warnings \"{url}\"");
+            using var d = System.Text.Json.JsonDocument.Parse(j); var root = d.RootElement; int n = 0;
+            string S(System.Text.Json.JsonElement e, string k) => e.TryGetProperty(k, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : null;
+            void One(System.Text.Json.JsonElement e, string ch)
+            {
+                var id = S(e, "id"); var title = S(e, "title"); if (id == null || (title != null && title.StartsWith("["))) return;
+                pl.Add(new Track { Url = "https://www.youtube.com/watch?v=" + id, Title = title ?? "Untitled", Artist = S(e, "channel") ?? S(e, "uploader") ?? ch ?? "YouTube", Album = "YouTube",
+                    Dur = e.TryGetProperty("duration", out var du) && du.ValueKind == System.Text.Json.JsonValueKind.Number ? du.GetDouble() : 0 }); n++;
+            }
+            if (root.TryGetProperty("entries", out var en)) { var pc = S(root, "uploader") ?? S(root, "channel"); foreach (var e in en.EnumerateArray()) One(e, pc); }
+            else One(root, null);
+            status = $"Linked {n} tracks from the Wired"; if (cur < 0 && pl.Count > 0) Play(0);
+        }
+        catch (Exception ex) { status = "SIGNAL LOST: " + ex.Message; }
+    }
+    void Tune(int i, int my)
+    {
+        var t = pl[i]; status = "Tuning into the Wired...";
+        Task.Run(async () =>
+        {
+            try
+            {
+                var u = (await Ytdlp($"-f \"bestaudio[ext=m4a]/bestaudio\" -g --no-playlist --no-warnings \"{t.Url}\"")).Trim().Split('\n')[0].Trim();
+                if (!u.StartsWith("http")) throw new Exception("no stream found - delete %LocalAppData%\\TheWiredMusic\\yt-dlp.exe to update it");
+                BeginInvoke(new Action(() =>
+                {
+                    if (my != gen) return;
+                    try
+                    {
+                        rd = Rd(u); vsp = new VolumeSampleProvider(rd.ToSampleProvider()) { Volume = mute ? 0 : vol }; tap = new Tap(vsp);
+                        wo = new WaveOutEvent(); wo.Init(tap.ToWaveProvider()); wo.Play(); playing = true; status = "Now Playing: " + t.Artist + " - " + t.Title;
+                    }
+                    catch (Exception ex) { status = "SIGNAL LOST: " + ex.Message; }
+                }));
+            }
+            catch (Exception ex) { BeginInvoke(new Action(() => { if (my == gen) status = "SIGNAL LOST: " + ex.Message; })); }
+        });
+    }
 
     void Tick()
     {
@@ -294,7 +364,7 @@ class Wired : Form
     protected override void OnMouseWheel(MouseEventArgs e) { if (rPl.Contains(e.Location)) scroll = Math.Clamp(scroll - Math.Sign(e.Delta) * 3, 0, Math.Max(0, pl.Count - 1)); }
     protected override void OnKeyDown(KeyEventArgs e)
     {
-        if (e.KeyCode == Keys.Space) Toggle(); else if (e.KeyCode == Keys.Right) Next(); else if (e.KeyCode == Keys.Left) Prev();
+        if (e.Control && e.KeyCode == Keys.V && Clipboard.ContainsText() && Clipboard.GetText().Contains("youtu")) AddYt(Clipboard.GetText().Trim()); else if (e.KeyCode == Keys.Space) Toggle(); else if (e.KeyCode == Keys.Right) Next(); else if (e.KeyCode == Keys.Left) Prev();
     }
 
     void ShowMenu(int i)
@@ -305,10 +375,10 @@ class Wired : Form
         void OpenDir() { using var d = new FolderBrowserDialog(); if (d.ShowDialog() == DialogResult.OK) Add(new[] { d.SelectedPath }); }
         switch (i)
         {
-            case 0: A("Open files...", OpenFiles); A("Open folder...", OpenDir); A("Exit", Close); break;
+            case 0: A("Open files...", OpenFiles); A("Open folder...", OpenDir); A("Open YouTube link...", OpenYt); A("Exit", Close); break;
             case 1: A(crt ? "CRT scanlines: on" : "CRT scanlines: off", () => crt = !crt); break;
             case 2: A("Play / Pause", Toggle); A("Previous", Prev); A("Next", Next); A("Shuffle", () => shuf = !shuf); A("Repeat", () => rep = !rep); break;
-            case 3: A("Add folder...", OpenDir); A("Clear playlist", () => { Stop(); pl.Clear(); cur = -1; scroll = 0; status = "NOT CONNECTED"; }); break;
+            case 3: A("Add folder...", OpenDir); A("Add YouTube link...", OpenYt); A("Clear playlist", () => { Stop(); pl.Clear(); cur = -1; scroll = 0; status = "NOT CONNECTED"; }); break;
             case 4: A("About THE WIRED MUSIC", () => MessageBox.Show("THE WIRED MUSIC.exe\nwired.exe  build 1999.12\n\nWHERE MUSIC MEETS THE WIRED\n\nNO MATTER WHERE YOU ARE,\nEVERYONE IS ALWAYS CONNECTED.", "THE WIRED MUSIC", MessageBoxButtons.OK, MessageBoxIcon.Information)); break;
         }
         m.Show(this, new Point(MenuX(i) - 4, 52));
