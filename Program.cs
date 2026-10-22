@@ -26,7 +26,7 @@ class Tap : ISampleProvider
     public float[] Snap() { lock (l) { var c = new float[buf.Length]; for (int i = 0; i < c.Length; i++) c[i] = buf[(pos + i) % buf.Length]; return c; } }
 }
 
-class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Image Art; }
+class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Image Art; public bool Saved; }
 
 class Wired : Form
 {
@@ -46,10 +46,10 @@ class Wired : Form
     readonly Font F = new("Tahoma", 9f), FA = new("Tahoma", 10f), FT = new("Segoe UI", 17f), FM = new("Consolas", 9f), FD = new("Consolas", 24f, FontStyle.Bold);
 
     readonly Rectangle rArt = new(20, 86, 132, 132), rSeek = new(20, 234, 620, 6), rVol = new(372, 278, 230, 8), rA = new(8, 56, 640, 252),
-        rVis = new(8, 318, 320, 240), rLyr = new(334, 318, 314, 240), rPl = new(656, 56, 336, 468), rSt = new(8, 566, 984, 24),
-        rBF = new(656, 530, 108, 28), rBY = new(770, 530, 222, 28), rMin = new(918, 5, 22, 16), rMax = new(942, 5, 22, 16), rClose = new(966, 5, 22, 16);
+        rVis = new(8, 318, 320, 240), rLyr = new(334, 318, 314, 240), rPl = new(656, 56, 336, 436), rSt = new(8, 566, 984, 24),
+        rBF = new(656, 530, 108, 28), rDT = new(656, 496, 164, 28), rDA = new(826, 496, 166, 28), rBY = new(770, 530, 222, 28), rMin = new(918, 5, 22, 16), rMax = new(942, 5, 22, 16), rClose = new(966, 5, 22, 16);
     readonly Rectangle[] rb = { new(20, 260, 44, 44), new(70, 256, 52, 52), new(128, 260, 44, 44), new(190, 268, 32, 32), new(228, 268, 32, 32), new(266, 268, 32, 32) };
-    readonly Random R = new(); int gl; Point mp;
+    readonly Random R = new(); int gl; Point mp; bool dlBusy;
     readonly string[] menus = { "File", "View", "Playback", "Library", "Help" };
 
     public Wired()
@@ -131,6 +131,7 @@ class Wired : Form
             System.IO.File.WriteAllBytes(exe, await h.GetByteArrayAsync("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"));
         }
         var psi = new System.Diagnostics.ProcessStartInfo(exe, args) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true, StandardOutputEncoding = System.Text.Encoding.UTF8 };
+        psi.Environment["PYTHONIOENCODING"] = "utf-8"; psi.Environment["PYTHONUTF8"] = "1";
         using var p = System.Diagnostics.Process.Start(psi);
         var o = await p.StandardOutput.ReadToEndAsync(); await p.WaitForExitAsync(); return o;
     }
@@ -140,6 +141,27 @@ class Wired : Form
         var tb = new TextBox { Left = 10, Top = 12, Width = 500 }; var ok = new Button { Text = "Connect", Left = 420, Top = 45, DialogResult = DialogResult.OK };
         f.Controls.Add(tb); f.Controls.Add(ok); f.AcceptButton = ok;
         return f.ShowDialog() == DialogResult.OK ? tb.Text.Trim() : null;
+    }
+    async void Download(List<Track> list)
+    {
+        list = list.Where(t => t.Url != null).ToList();
+        if (list.Count == 0) { status = "Nothing to download - add a YouTube link first"; return; }
+        if (dlBusy) { status = "A download is already running"; return; }
+        using var d = new FolderBrowserDialog { Description = "Choose where to save the music" };
+        if (d.ShowDialog() != DialogResult.OK) return;
+        dlBusy = true; int ok = 0; var tpl = System.IO.Path.Combine(d.SelectedPath, "%(title)s.%(ext)s");
+        for (int i = 0; i < list.Count; i++)
+        {
+            var t = list[i]; status = $"Downloading {i + 1}/{list.Count}: {t.Title}";
+            try
+            {
+                var o = await Ytdlp($"-f \"bestaudio[ext=m4a]/bestaudio\" --no-playlist --no-warnings --no-simulate --print after_move:filepath -o \"{tpl}\" \"{t.Url}\"");
+                var path = o.Trim().Split('\n').Last().Trim();
+                if (System.IO.File.Exists(path)) { ok++; t.Saved = true; }
+            }
+            catch { }
+        }
+        dlBusy = false; status = $"Downloaded {ok}/{list.Count} to {d.SelectedPath}";
     }
     void OpenYt() { var u = Ask("Paste a YouTube video or playlist link"); if (!string.IsNullOrEmpty(u)) AddYt(u); }
     async void AddYt(string url)
@@ -348,11 +370,13 @@ class Wired : Form
             if (cu) { Fill(g, A(SEL, 210), new Rectangle(rPl.X + 2, y, rPl.Width - 4, 17)); Fill(g, RED, new Rectangle(rPl.X + 2, y, 3, 17)); }
             else if (new Rectangle(rPl.X, y, rPl.Width, 17).Contains(mp)) Fill(g, A(HI, 18), new Rectangle(rPl.X + 2, y, rPl.Width - 4, 17));
             Tx(g, (k + 1).ToString("00"), FM, cu ? HI : DM, rPl.X + 10, y + 1);
-            g.SetClip(new Rectangle(rPl.X + 36, y, rPl.Width - 118, 17)); Tx(g, tk.Artist + " - " + tk.Title, F, cu ? Color.White : TX, rPl.X + 38, y + 1); g.ResetClip();
-            if (tk.Url != null) Tx(g, "YT", FM, RED, rPl.Right - 84, y + 1);
-            Tx(g, Fm(tk.Dur), FM, DM, rPl.Right - 50, y + 1);
+            g.SetClip(new Rectangle(rPl.X + 36, y, rPl.Width - 136, 17)); Tx(g, tk.Artist + " - " + tk.Title, F, cu ? Color.White : TX, rPl.X + 38, y + 1); g.ResetClip();
+            if (tk.Url != null) { Tx(g, "YT", FM, RED, rPl.Right - 96, y + 1); Tx(g, tk.Saved ? "✓" : "↓", FM, tk.Saved ? HI : (new Rectangle(rPl.Right - 28, y, 24, 17).Contains(mp) ? Color.White : TX), rPl.Right - 24, y + 1); }
+            Tx(g, Fm(tk.Dur), FM, DM, rPl.Right - 66, y + 1);
         }
         Bev(g, rBF, rBF.Contains(mp), false, false); Ctr(g, "+ FILES", FM, TX, rBF);
+        Bev(g, rDT, rDT.Contains(mp), false, false); Ctr(g, "↓ THIS SONG", FM, TX, rDT);
+        Bev(g, rDA, rDA.Contains(mp), dlBusy, false); Ctr(g, dlBusy ? "DOWNLOADING..." : "↓ DOWNLOAD ALL", FM, dlBusy ? RED : TX, rDA);
         Bev(g, rBY, rBY.Contains(mp), true, false, RED); Ctr(g, "+ ADD YT LINK", FM, Color.White, rBY);
         g.FillPolygon(new SolidBrush(RED), new[] { new PointF(rBY.X + 14, rBY.Y + 9), new PointF(rBY.X + 14, rBY.Y + 19), new PointF(rBY.X + 23, rBY.Y + 14) });
 
@@ -390,11 +414,13 @@ class Wired : Form
         if (p.Y < 50) { for (int i = 4; i >= 0; i--) if (p.X >= MenuX(i) - 4) { ShowMenu(i); break; } return; }
         if (Rectangle.Inflate(rSeek, 0, 8).Contains(p)) { dragSeek = true; Seek(p.X); return; }
         if (Rectangle.Inflate(rVol, 6, 8).Contains(p)) { dragVol = true; SetVol(p.X); return; }
+        if (rDT.Contains(p)) { if (cur >= 0) Download(new List<Track> { pl[cur] }); return; }
+        if (rDA.Contains(p)) { Download(pl.ToList()); return; }
         if (rBF.Contains(p)) { PickFiles(); return; }
         if (rBY.Contains(p)) { OpenYt(); return; }
         for (int i = 0; i < 6; i++)
             if (rb[i].Contains(p)) { if (i == 0) Prev(); else if (i == 1) Toggle(); else if (i == 2) Next(); else if (i == 3) rep = !rep; else if (i == 4) shuf = !shuf; else { mute = !mute; Vol(); } return; }
-        if (rPl.Contains(p) && p.Y > rPl.Y + 26) { int k = scroll + (p.Y - rPl.Y - 26) / 17; if (k < pl.Count) Play(k); }
+        if (rPl.Contains(p) && p.Y > rPl.Y + 26) { int k = scroll + (p.Y - rPl.Y - 26) / 17; if (k < pl.Count) { if (pl[k].Url != null && p.X > rPl.Right - 28) Download(new List<Track> { pl[k] }); else Play(k); } }
     }
     protected override void OnMouseMove(MouseEventArgs e) { mp = e.Location; if (dragSeek) Seek(e.X); if (dragVol) SetVol(e.X); }
     protected override void OnMouseUp(MouseEventArgs e) { dragSeek = dragVol = false; }
@@ -413,7 +439,7 @@ class Wired : Form
         void OpenDir() { using var d = new FolderBrowserDialog(); if (d.ShowDialog() == DialogResult.OK) Add(new[] { d.SelectedPath }); }
         switch (i)
         {
-            case 0: A("Open files...", OpenFiles); A("Open folder...", OpenDir); A("Open YouTube link...", OpenYt); A("Exit", Close); break;
+            case 0: A("Open files...", OpenFiles); A("Open folder...", OpenDir); A("Open YouTube link...", OpenYt); A("Download all YouTube tracks...", () => Download(pl.ToList())); A("Exit", Close); break;
             case 1: A(crt ? "CRT scanlines: on" : "CRT scanlines: off", () => crt = !crt); break;
             case 2: A("Play / Pause", Toggle); A("Previous", Prev); A("Next", Next); A("Shuffle", () => shuf = !shuf); A("Repeat", () => rep = !rep); break;
             case 3: A("Add folder...", OpenDir); A("Add YouTube link...", OpenYt); A("Clear playlist", () => { Stop(); pl.Clear(); cur = -1; scroll = 0; status = "NOT CONNECTED"; }); break;
