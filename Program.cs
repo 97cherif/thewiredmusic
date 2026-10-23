@@ -83,7 +83,7 @@ class Buffered : ISampleProvider, IDisposable
 class PersistTrack { public string Url { get; set; } public string Path { get; set; } public string Title { get; set; } public string Artist { get; set; } public string Album { get; set; } public string Year { get; set; } public double Dur { get; set; } public bool Saved { get; set; } }
 class PersistData { public List<PersistTrack> Tracks { get; set; } = new(); public int Cur { get; set; } = -1; public float Vol { get; set; } = .6f; public bool Shuf { get; set; } public bool Rep { get; set; } }
 
-class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Bitmap Art; public bool Saved, HadTitle; }
+class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Bitmap Art; public bool Saved, HadTitle, Real, Thumbing; }
 
 class Wired : Form
 {
@@ -196,6 +196,7 @@ class Wired : Form
                     if (tf.Tag.Pictures.Length > 0) { using var ms = new MemoryStream(tf.Tag.Pictures[0].Data.Data); using var im = Image.FromStream(ms); t.Art = Square(im, 320); }
                 }
                 catch { }
+                if (t.Art == null) t.Art = FolderArt(f); t.Real = t.Art != null;
                 Fix(t, f);
                 try
                 {
@@ -283,6 +284,52 @@ class Wired : Form
         t.Artist = a;
         if (t.Path != null) { lock (ov) { ov[t.Path] = a; try { System.IO.File.WriteAllLines(OvFile, ov.Select(x => x.Key + "\t" + x.Value)); } catch { } } }
         Invalidate();
+    }
+
+    // ---------- real cover art: embedded tag > image in the song's folder > YouTube thumbnail > your default covers ----------
+    static readonly SemaphoreSlim thumbSem = new(4, 4);
+    static Bitmap FolderArt(string f)
+    {
+        try
+        {
+            var dir = System.IO.Path.GetDirectoryName(f); if (dir == null) return null;
+            var names = new List<string> { System.IO.Path.GetFileNameWithoutExtension(f), "cover", "folder", "front", "album", "albumart", "artwork", "thumb" };
+            foreach (var n in names) foreach (var e in new[] { ".jpg", ".jpeg", ".png" })
+            {
+                var p = System.IO.Path.Combine(dir, n + e);
+                if (System.IO.File.Exists(p)) { using var im = Image.FromFile(p); return Square(im, 320); }
+            }
+        }
+        catch { }
+        return null;
+    }
+    static Bitmap LoadThumb(string url)
+    {
+        var id = IdOf(url); if (id == null) return null;
+        thumbSem.Wait();
+        try
+        {
+            var f = System.IO.Path.Combine(CacheDir(), id + ".jpg");
+            if (!System.IO.File.Exists(f))
+            {
+                using var h = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+                System.IO.File.WriteAllBytes(f, h.GetByteArrayAsync("https://i.ytimg.com/vi/" + id + "/hqdefault.jpg").GetAwaiter().GetResult());
+            }
+            using var im = Image.FromFile(f); int sq = (int)(im.Height * .75f); // cut off the black bars of the 4:3 thumbnail
+            var b = new Bitmap(320, 320, PixelFormat.Format32bppPArgb); using var g = Graphics.FromImage(b); g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.DrawImage(im, new Rectangle(0, 0, 320, 320), (im.Width - sq) / 2, (im.Height - sq) / 2, sq, sq, GraphicsUnit.Pixel); return b;
+        }
+        catch { return null; }
+        finally { thumbSem.Release(); }
+    }
+    void Thumb(Track t)
+    {
+        if (t.Real || t.Thumbing || t.Url == null) return; t.Thumbing = true;
+        Task.Run(() =>
+        {
+            var bm = LoadThumb(t.Url);
+            try { BeginInvoke(new Action(() => { t.Thumbing = false; if (bm != null) { t.Art = bm; t.Real = true; if (artFor == t) artFor = null; Invalidate(); } })); } catch { }
+        });
     }
 
     // ---------- playback ----------
@@ -439,7 +486,7 @@ class Wired : Form
             }
             if (root.TryGetProperty("entries", out var en)) { var pc2 = S(root, "uploader") ?? S(root, "channel"); foreach (var e in en.EnumerateArray()) One(e, pc2); }
             else One(root, null);
-            SaveState(); St($"Added {n} tracks", 4000); if (cur < 0 && pl.Count > 0) Play(0); else Invalidate();
+            foreach (var y in pl.Where(x => x.Url != null).ToList()) Thumb(y); SaveState(); St($"Added {n} tracks", 4000); if (cur < 0 && pl.Count > 0) Play(0); else Invalidate();
         }
         catch (Exception ex) { St("Couldn't connect: " + ex.Message, 6000); }
     }
@@ -938,9 +985,9 @@ class Wired : Form
         }
         Track Pick() => lb.SelectedIndex >= 0 && lb.SelectedIndex < results.Count ? results[lb.SelectedIndex] : null;
         var bPlay = Flat("Play", 16, 422, ICE); var bQ = Flat("+ Queue", 132, 422, TX); var bDl = Flat("Download MP3", 248, 422, TX); bDl.Width = 130; var bX = Flat("Close", 514, 422, TX);
-        bPlay.Click += (s, e) => { var t = Pick(); if (t == null) return; after = () => { t.Art = RandomCover(); pl.Add(t); SaveState(); Play(pl.Count - 1); }; f.Close(); };
+        bPlay.Click += (s, e) => { var t = Pick(); if (t == null) return; after = () => { t.Art = RandomCover(); pl.Add(t); Thumb(t); SaveState(); Play(pl.Count - 1); }; f.Close(); };
         lb.DoubleClick += (s, e) => bPlay.PerformClick();
-        bQ.Click += (s, e) => { var t = Pick(); if (t == null) return; t.Art = RandomCover(); pl.Add(t); SaveState(); lbl.Text = "Added to playlist"; if (cur < 0) Play(0); else Invalidate(); };
+        bQ.Click += (s, e) => { var t = Pick(); if (t == null) return; t.Art = RandomCover(); pl.Add(t); Thumb(t); SaveState(); lbl.Text = "Added to playlist"; if (cur < 0) Play(0); else Invalidate(); };
         bDl.Click += (s, e) => { var t = Pick(); if (t == null) return; after = () => Download(new List<Track> { t }); f.Close(); };
         bX.Click += (s, e) => f.Close();
         go.Click += async (s, e) => await Search();
@@ -982,6 +1029,7 @@ class Wired : Form
     // covers + lyrics of local songs are re-read in the background after launch
     void ReloadMeta()
     {
+        foreach (var y in pl.Where(x => x.Url != null).ToList()) Thumb(y);
         var locals = pl.Where(t => t.Path != null).ToList();
         Task.Run(() =>
         {
@@ -991,7 +1039,7 @@ class Wired : Form
                 {
                     using var tf = TagLib.File.Create(t.Path); string ly = tf.Tag.Lyrics; Bitmap bm = null;
                     if (tf.Tag.Pictures.Length > 0) { using var ms = new MemoryStream(tf.Tag.Pictures[0].Data.Data); using var im = Image.FromStream(ms); bm = Square(im, 320); }
-                    BeginInvoke(new Action(() => { t.Lyr = ly; if (bm != null) { t.Art = bm; if (artFor == t) artFor = null; } Invalidate(); }));
+                    bm ??= FolderArt(t.Path); BeginInvoke(new Action(() => { t.Lyr = ly; if (bm != null) { t.Art = bm; t.Real = true; if (artFor == t) artFor = null; } Invalidate(); }));
                 }
                 catch { }
             }
