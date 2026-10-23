@@ -953,55 +953,267 @@ class Wired : Form
     // ---------- online search (YouTube via yt-dlp) ----------
     void OpenSearch()
     {
-        using var f = new Form { FormBorderStyle = FormBorderStyle.None, Size = new Size(640, 470), StartPosition = FormStartPosition.CenterParent, BackColor = Color.FromArgb(10, 16, 22), ShowInTaskbar = false };
-        using var fT = new Font("Segoe UI", 10f); using var fS2 = new Font("Segoe UI", 8.5f); using var fIn = new Font("Segoe UI", 10.5f);
-        var results = new List<Track>(); Action after = null;
-        f.Paint += (s, e) => { e.Graphics.DrawRectangle(Pe(Al(ICE, 60), 1), 0, 0, f.Width - 1, f.Height - 1); e.Graphics.DrawString("Search music online", fT, Br(DM), 16, 12); };
-        var tb = new TextBox { Left = 16, Top = 40, Width = 500, BorderStyle = BorderStyle.FixedSingle, BackColor = BG, ForeColor = ICE2, Font = fIn };
-        var go = Flat("Search", 526, 38, ICE); go.Width = 98;
-        var lb = new ListBox { Left = 16, Top = 82, Width = 608, Height = 300, BackColor = BG, ForeColor = TX, BorderStyle = BorderStyle.None, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 42, IntegralHeight = false };
-        var lbl = new Label { Left = 16, Top = 392, Width = 608, Height = 20, ForeColor = DM, Font = fS2, Text = "" };
-        lb.DrawItem += (s, e) =>
+        // logical layout (scaled by DPI, same approach as the main window)
+        const int DW = 680, DH = 520, PX = 20, PY = 108, PW = 640, PH = 344, RowS = 56, VY = PY + 4, VH = PH - 8;
+        float u = U;
+        using var f = new Form { FormBorderStyle = FormBorderStyle.None, AutoScaleMode = AutoScaleMode.None, StartPosition = FormStartPosition.CenterParent, BackColor = BG, ShowInTaskbar = false, KeyPreview = true, ClientSize = new Size((int)(DW * u), (int)(DH * u)) };
+        var surf = new DBuf { Dock = DockStyle.Fill, BackColor = BG };
+        f.Controls.Add(surf);
+        using var fIn = Fn("Segoe UI", 15 * u);
+        var fieldBg = Color.FromArgb(15, 25, 33);
+
+        var rClose2 = new Rectangle(DW - 44, 6, 32, 32);
+        var rField = new Rectangle(PX, 52, PW, 44);
+        var rGo = new Rectangle(rField.Right - 8 - 92, rField.Y + 7, 92, 30);
+        var rClr2 = new Rectangle(rGo.X - 34, rField.Y + 11, 22, 22);
+        var rBDl = new Rectangle(PX + PW - 140, 468, 140, 32);
+        var rBQ = new Rectangle(rBDl.X - 8 - 100, 468, 100, 32);
+        var rBPlay = new Rectangle(rBQ.X - 8 - 92, 468, 92, 32);
+
+        var tb = new TextBox
         {
-            if (e.Index < 0 || e.Index >= results.Count) return; var t = results[e.Index]; bool sel = (e.State & DrawItemState.Selected) != 0; var gg = e.Graphics;
-            gg.FillRectangle(Br(sel ? Color.FromArgb(28, 52, 64) : BG), e.Bounds);
-            gg.DrawString(t.Title, fT, Br(sel ? WH : TX), new RectangleF(e.Bounds.X + 10, e.Bounds.Y + 4, e.Bounds.Width - 80, 20), sfL);
-            gg.DrawString(t.Artist, fS2, Br(DM), new RectangleF(e.Bounds.X + 10, e.Bounds.Y + 23, e.Bounds.Width - 80, 16), sfL);
-            if (t.Dur > 0) gg.DrawString(Fm(t.Dur), fS2, Br(DM), new RectangleF(e.Bounds.Right - 70, e.Bounds.Y + 14, 60, 16), sfR);
+            BorderStyle = BorderStyle.None, BackColor = fieldBg, ForeColor = ICE2, Font = fIn, MaxLength = 120, PlaceholderText = "Search songs, artists…",
+            Left = (int)((PX + 46) * u), Width = (int)((rClr2.X - 6 - (PX + 46)) * u)
         };
+        tb.Top = (int)((rField.Y + rField.Height / 2f) * u) - tb.Height / 2;
+        surf.Controls.Add(tb);
+
+        var results = new List<Track>(); var thumbs = new Dictionary<string, Bitmap>();
+        Action after = null; Bitmap bgB = null; var anim = new System.Windows.Forms.Timer { Interval = 33 };
+        string note = "", lastQ = "", eT = "Find something to play", eS = "Type a song or an artist, then press Enter"; bool busy = false, closed = false, eErr = false;
+        int sel = -1, hv = 0, sgen = 0; float scrollY = 0;
+
+        float MaxS() => Math.Max(0, results.Count * RowS - VH);
+        void EnsVis() { float top = sel * RowS, bot = top + RowS; if (top < scrollY) scrollY = top; else if (bot > scrollY + VH) scrollY = bot - VH; scrollY = Math.Clamp(scrollY, 0, MaxS()); }
+        Track Pick() => sel >= 0 && sel < results.Count ? results[sel] : null;
+
+        int HitT(Point p)
+        {
+            if (rClose2.Contains(p)) return 1;
+            if (!busy && rGo.Contains(p)) return 2;
+            if (tb.Text.Length > 0 && rClr2.Contains(p)) return 3;
+            if (sel >= 0 && rBPlay.Contains(p)) return 4;
+            if (sel >= 0 && rBQ.Contains(p)) return 5;
+            if (sel >= 0 && rBDl.Contains(p)) return 6;
+            if (!busy && p.X >= PX && p.X < PX + PW && p.Y >= VY && p.Y < VY + VH)
+            {
+                int k = (int)((p.Y - VY + scrollY) / RowS);
+                if (k >= 0 && k < results.Count) return (p.X >= PX + 16 && p.X < PX + 56 ? 1000 : 100) + k;
+            }
+            return 0;
+        }
+
+        // pill button, same look as the playlist pills (dimmed when disabled)
+        void Btn(Graphics g, Rectangle r, string txt, int ico, bool hot, bool acc, bool en)
+        {
+            float k = en ? 1f : .4f; var bc2 = acc ? ICE : WH;
+            FillRR(g, Br(Al(bc2, (int)((hot && en ? (acc ? 50 : 28) : (acc ? 26 : 12)) * k))), r, 16);
+            DrawRR(g, Pe(Al(bc2, (int)((acc ? 90 : 28) * k)), 1f), new RectangleF(r.X + .5f, r.Y + .5f, r.Width - 1, r.Height - 1), 16);
+            var col = en ? (acc ? ICE2 : TX) : DM;
+            if (ico >= 0) { Ico(g, ico, r.X + 22, r.Y + r.Height / 2f, 5.5f, col, 1.5f); TxtIn(g, txt, fBtn, col, new RectangleF(r.X + 32, r.Y, r.Width - 32, r.Height), sfCC); }
+            else TxtIn(g, txt, fBtn, col, r, sfCC);
+        }
+
+        // ---------- painting ----------
+        surf.Paint += (s, e) =>
+        {
+            var g = e.Graphics; int pw = surf.ClientSize.Width, ph = surf.ClientSize.Height; if (pw <= 0 || ph <= 0) return;
+            if (bgB == null || bgB.Width != pw || bgB.Height != ph)
+            {
+                bgB?.Dispose(); bgB = new Bitmap(pw, ph, PixelFormat.Format32bppPArgb);
+                using var bg2 = Graphics.FromImage(bgB); bg2.SmoothingMode = SmoothingMode.AntiAlias;
+                using (var lb = new LinearGradientBrush(new Rectangle(0, 0, pw, ph), Color.FromArgb(10, 18, 26), Color.FromArgb(4, 7, 11), 90f)) bg2.FillRectangle(lb, 0, 0, pw, ph);
+                using var gp = new GraphicsPath(); gp.AddEllipse(pw * .05f, -ph * .55f, pw * .9f, ph * 1.2f);
+                using var pb = new PathGradientBrush(gp) { CenterColor = Al(ICE, 30), SurroundColors = new[] { Al(ICE, 0) } }; bg2.FillPath(pb, gp);
+            }
+            g.DrawImage(bgB, 0, 0, pw, ph);
+            g.DrawRectangle(Pe(Al(ICE, 60), 1), 0, 0, pw - 1, ph - 1);
+            g.SmoothingMode = SmoothingMode.AntiAlias; g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit; g.ScaleTransform(u, u);
+
+            // header
+            Txt(g, "SEARCH ONLINE", fHdr, DM, PX, 15, 300);
+            Hov(g, rClose2, hv == 1, true); Ico(g, I_CLOSE, rClose2.X + 16, rClose2.Y + 16, 6, hv == 1 ? WH : TX);
+
+            // search field
+            bool foc = tb.Focused;
+            if (foc) DrawRR(g, Pe(Al(ICE, 26), 4f), new RectangleF(rField.X - 1, rField.Y - 1, rField.Width + 2, rField.Height + 2), 26);
+            FillRR(g, Br(fieldBg), rField, 24);
+            DrawRR(g, Pe(foc ? Al(ICE, 140) : Al(WH, 28), 1f), new RectangleF(rField.X + .5f, rField.Y + .5f, rField.Width - 1, rField.Height - 1), 24);
+            Ico(g, I_SEARCH, rField.X + 25, rField.Y + 21, 7.5f, foc ? ICE : DM);
+            if (tb.Text.Length > 0) { Hov(g, rClr2, hv == 3, false); Ico(g, I_CLOSE, rClr2.X + 11, rClr2.Y + 11, 4.5f, hv == 3 ? WH : DM, 1.5f); }
+            Btn(g, rGo, "Search", -1, hv == 2, true, !busy);
+
+            // results panel (glass, like the playlist)
+            var pr = new RectangleF(PX, PY, PW, PH);
+            using (var gb = new LinearGradientBrush(pr, Al(WH, 15), Al(WH, 4), 90f)) FillRR(g, gb, pr, 28);
+            DrawRR(g, Pe(Al(WH, 22), 1f), new RectangleF(PX + .5f, PY + .5f, PW - 1, PH - 1), 28);
+
+            var st = g.Save(); using (var cp = RR(new RectangleF(PX + 1, PY + 1, PW - 2, PH - 2), 27)) g.SetClip(cp);
+            if (busy)
+            {
+                float wave = Environment.TickCount / 380f;
+                for (int i = 0; i < 6; i++)
+                {
+                    float y = VY + i * RowS; int a = 9 + (int)(7 * (Math.Sin(wave - i * .6f) + 1));
+                    FillRR(g, Br(Al(WH, a)), new RectangleF(PX + 16, y + 8, 40, 40), 10);
+                    FillRR(g, Br(Al(WH, a)), new RectangleF(PX + 68, y + 14, 230 - (i % 3) * 36, 10), 10);
+                    FillRR(g, Br(Al(WH, a * 3 / 4)), new RectangleF(PX + 68, y + 32, 120 + (i % 2) * 34, 8), 8);
+                    FillRR(g, Br(Al(WH, a * 3 / 4)), new RectangleF(PX + PW - 66, y + 24, 34, 8), 8);
+                }
+            }
+            else if (results.Count == 0)
+            {
+                float cx = PX + PW / 2f, cy = PY + PH / 2f - 26;
+                g.FillEllipse(Br(Al(eErr ? Color.FromArgb(255, 120, 130) : ICE, 14)), cx - 34, cy - 34, 68, 68);
+                g.DrawEllipse(Pe(Al(eErr ? Color.FromArgb(255, 120, 130) : ICE, 55), 1f), cx - 34, cy - 34, 68, 68);
+                if (eErr) Ico(g, I_CLOSE, cx, cy, 10, Color.FromArgb(255, 140, 150), 1.8f); else Ico(g, I_SEARCH, cx, cy, 13, ICE, 1.8f);
+                TxtIn(g, eT, fRow, TX, new RectangleF(PX + 20, cy + 46, PW - 40, 20), sfCC);
+                TxtIn(g, eS, fS, DM, new RectangleF(PX + 20, cy + 68, PW - 40, 18), sfCC);
+            }
+            else
+            {
+                int hr = hv >= 1000 ? hv - 1000 : hv >= 100 ? hv - 100 : -1;
+                int first = Math.Max(0, (int)(scrollY / RowS)), last = Math.Min(results.Count - 1, (int)((scrollY + VH) / RowS));
+                for (int k = first; k <= last; k++)
+                {
+                    float y = VY + k * RowS - scrollY; var tk = results[k]; bool isSel = k == sel, isHot = k == hr, inPl = pl.Contains(tk);
+                    var rr = new RectangleF(PX + 6, y + 2, PW - 12 - 8, RowS - 4);
+                    if (isSel) FillRR(g, Br(Al(ICE, 28)), rr, 20); else if (isHot) FillRR(g, Br(Al(WH, 12)), rr, 20);
+
+                    // thumbnail (rounded), with a play overlay on hover
+                    var tr = new RectangleF(PX + 16, y + 8, 40, 40); var st2 = g.Save();
+                    using (var tp = RR(tr, 10))
+                    {
+                        g.SetClip(tp, CombineMode.Intersect);
+                        if (thumbs.TryGetValue(tk.Url, out var tbm)) g.DrawImage(tbm, tr);
+                        else { using var tlb = new LinearGradientBrush(tr, Color.FromArgb(22, 44, 58), Color.FromArgb(8, 14, 20), 90f); g.FillRectangle(tlb, tr); g.DrawEllipse(Pe(Al(ICE, 50), 1f), tr.X + 12, tr.Y + 12, 16, 16); }
+                        if (isHot) g.FillRectangle(Br(Color.FromArgb(150, 6, 12, 18)), tr);
+                    }
+                    g.Restore(st2);
+                    DrawRR(g, Pe(Al(WH, 30), 1f), new RectangleF(tr.X + .5f, tr.Y + .5f, tr.Width - 1, tr.Height - 1), 10);
+                    if (isHot) Ico(g, I_PLAY, tr.X + 20, tr.Y + 20, 7, hv >= 1000 ? WH : ICE2);
+
+                    float tx = PX + 68, right = rr.Right - 14 - 46 - (inPl ? 24 : 0);
+                    Txt(g, tk.Title, fRow, isSel ? WH : TX, tx, y + 10, right - tx); Txt(g, tk.Artist, fXs, DM, tx, y + 29, right - tx);
+                    if (tk.Dur > 0) TxtIn(g, Fm(tk.Dur), fXs, DM, new RectangleF(rr.Right - 14 - 46, y + 20, 46, 16), sfR);
+                    if (inPl) Ico(g, I_CHECK, rr.Right - 14 - 46 - 12, y + RowS / 2f, 5.5f, ICE);
+                }
+                float mx = MaxS();
+                if (mx > 0)
+                {
+                    float total = results.Count * RowS, th = Math.Max(28, VH * VH / total), ty = VY + (VH - th) * (scrollY / mx);
+                    FillRR(g, Br(Al(WH, hv == 0 ? 34 : 46)), new RectangleF(PX + PW - 12, ty, 4, th), 4);
+                }
+            }
+            g.Restore(st);
+
+            // footer: status + actions
+            string stx; var stc = DM;
+            if (busy) stx = "Searching YouTube…";
+            else if (note.Length > 0) { stx = note; stc = ICE; }
+            else if (results.Count > 0) stx = results.Count + (results.Count == 1 ? " result" : " results") + "  ·  ↑ ↓ browse  ·  Enter plays";
+            else stx = "Results from YouTube";
+            Txt(g, stx, fXs, stc, PX + 4, 477, rBPlay.X - PX - 16);
+            bool en = sel >= 0 && !busy;
+            Btn(g, rBPlay, "Play", I_PLAY, hv == 4, true, en); Btn(g, rBQ, "+ Queue", -1, hv == 5, false, en); Btn(g, rBDl, "Download MP3", I_DOWN, hv == 6, false, en);
+        };
+
+        // ---------- actions ----------
         async Task Search()
         {
-            var q = tb.Text.Trim().Replace("\"", ""); if (q.Length == 0) return;
-            lbl.Text = "Searching..."; go.Enabled = false;
+            var q = tb.Text.Trim().Replace("\"", "").Replace("\\", ""); if (q.Length == 0 || busy) return;
+            int my = ++sgen; busy = true; note = ""; lastQ = tb.Text.Trim(); anim.Start(); surf.Invalidate();
             try
             {
                 var j = await Ytdlp($"-J --flat-playlist --no-warnings \"ytsearch12:{q}\"");
-                using var d = System.Text.Json.JsonDocument.Parse(j); results.Clear(); lb.Items.Clear();
-                string S(System.Text.Json.JsonElement e, string k) => e.TryGetProperty(k, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : null;
+                if (closed || my != sgen) return;
+                using var d = System.Text.Json.JsonDocument.Parse(j); results.Clear(); sel = -1; scrollY = 0; eErr = false;
+                foreach (var tbm in thumbs.Values) tbm.Dispose(); thumbs.Clear();
+                string S(System.Text.Json.JsonElement el, string key) => el.TryGetProperty(key, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : null;
                 if (d.RootElement.TryGetProperty("entries", out var en))
-                    foreach (var e in en.EnumerateArray())
+                    foreach (var el in en.EnumerateArray())
                     {
-                        var id = S(e, "id"); if (id == null) continue;
-                        results.Add(YtFix(new Track { Url = "https://www.youtube.com/watch?v=" + id, Title = S(e, "title") ?? "Untitled", Artist = S(e, "channel") ?? S(e, "uploader") ?? "YouTube", Album = "YouTube",
-                            Dur = e.TryGetProperty("duration", out var du) && du.ValueKind == System.Text.Json.JsonValueKind.Number ? du.GetDouble() : 0 }));
-                        lb.Items.Add(id);
+                        var id = S(el, "id"); if (id == null) continue;
+                        results.Add(YtFix(new Track { Url = "https://www.youtube.com/watch?v=" + id, Title = S(el, "title") ?? "Untitled", Artist = S(el, "channel") ?? S(el, "uploader") ?? "YouTube", Album = "YouTube",
+                            Dur = el.TryGetProperty("duration", out var du) && du.ValueKind == System.Text.Json.JsonValueKind.Number ? du.GetDouble() : 0 }));
                     }
-                lbl.Text = results.Count == 0 ? "No results" : ""; if (lb.Items.Count > 0) lb.SelectedIndex = 0;
+                if (results.Count == 0) { eT = "No results"; eS = "Try different keywords"; } else sel = 0;
+                foreach (var r0 in results.ToList())
+                {
+                    var tr0 = r0;
+                    Task.Run(() =>
+                    {
+                        var bm = LoadThumb(tr0.Url); if (bm == null) return;
+                        try { surf.BeginInvoke(new Action(() => { if (closed || my != sgen) { bm.Dispose(); return; } thumbs[tr0.Url] = bm; surf.Invalidate(); })); } catch { bm.Dispose(); }
+                    });
+                }
             }
-            catch (Exception ex) { lbl.Text = "Search failed: " + ex.Message; }
-            finally { go.Enabled = true; }
+            catch (Exception ex)
+            {
+                if (closed) return;
+                results.Clear(); sel = -1; eErr = true; eT = "Search failed";
+                var m = (ex.Message ?? "").Split('\n')[0].Trim(); eS = m.Length > 90 ? m.Substring(0, 90) + "…" : m;
+            }
+            finally { busy = false; if (!closed) { anim.Stop(); surf.Invalidate(); } }
         }
-        Track Pick() => lb.SelectedIndex >= 0 && lb.SelectedIndex < results.Count ? results[lb.SelectedIndex] : null;
-        var bPlay = Flat("Play", 16, 422, ICE); var bQ = Flat("+ Queue", 132, 422, TX); var bDl = Flat("Download MP3", 248, 422, TX); bDl.Width = 130; var bX = Flat("Close", 514, 422, TX);
-        bPlay.Click += (s, e) => { var t = Pick(); if (t == null) return; after = () => { t.Art = RandomCover(); pl.Add(t); Thumb(t); SaveState(); Play(pl.Count - 1); }; f.Close(); };
-        lb.DoubleClick += (s, e) => bPlay.PerformClick();
-        bQ.Click += (s, e) => { var t = Pick(); if (t == null) return; t.Art = RandomCover(); pl.Add(t); Thumb(t); SaveState(); lbl.Text = "Added to playlist"; if (cur < 0) Play(0); else Invalidate(); };
-        bDl.Click += (s, e) => { var t = Pick(); if (t == null) return; after = () => Download(new List<Track> { t }); f.Close(); };
-        bX.Click += (s, e) => f.Close();
-        go.Click += async (s, e) => await Search();
-        tb.KeyDown += async (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await Search(); } else if (e.KeyCode == Keys.Escape) f.Close(); };
-        f.Controls.AddRange(new Control[] { tb, go, lb, lbl, bPlay, bQ, bDl, bX }); f.Shown += (s, e) => tb.Focus();
-        f.ShowDialog(this); after?.Invoke();
+        void DoPlay()
+        {
+            var t = Pick(); if (t == null) return;
+            after = () => { int ix = pl.IndexOf(t); if (ix >= 0) { Play(ix); return; } t.Art = RandomCover(); pl.Add(t); Thumb(t); SaveState(); Play(pl.Count - 1); };
+            f.Close();
+        }
+        void DoQ()
+        {
+            var t = Pick(); if (t == null) return;
+            if (pl.Contains(t)) { note = "Already in your playlist"; surf.Invalidate(); return; }
+            t.Art = RandomCover(); pl.Add(t); Thumb(t); SaveState(); note = "Added to playlist"; if (cur < 0) Play(0); else Invalidate(); surf.Invalidate();
+        }
+        void DoDl() { var t = Pick(); if (t == null) return; after = () => Download(new List<Track> { t }); f.Close(); }
+
+        // ---------- input ----------
+        anim.Tick += (s, e) => surf.Invalidate();
+        surf.MouseMove += (s, e) => { int h = HitT(V(e.Location)); if (h != hv) { hv = h; surf.Cursor = h != 0 ? Cursors.Hand : Cursors.Default; surf.Invalidate(); } };
+        surf.MouseLeave += (s, e) => { if (hv != 0) { hv = 0; surf.Invalidate(); } };
+        surf.MouseDown += (s, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return; var p = V(e.Location); int h = HitT(p);
+            if (h == 0 && p.Y < 46) { ReleaseCapture(); SendMessage(f.Handle, 0xA1, 2, 0); return; }
+            if (h == 1) { f.Close(); return; }
+            if (h == 2) _ = Search(); else if (h == 3) tb.Clear(); else if (h == 4) DoPlay(); else if (h == 5) DoQ(); else if (h == 6) DoDl();
+            else if (h >= 1000) { sel = h - 1000; DoPlay(); }
+            else if (h >= 100) { sel = h - 100; note = ""; }
+            if (!closed) { tb.Focus(); surf.Invalidate(); }
+        };
+        surf.MouseDoubleClick += (s, e) => { int h = HitT(V(e.Location)); if (h >= 100 && h < 1000) { sel = h - 100; DoPlay(); } };
+        MouseEventHandler wheel = (s, e) =>
+        {
+            if (MaxS() <= 0) return; scrollY = Math.Clamp(scrollY - e.Delta / 120f * RowS, 0, MaxS());
+            hv = HitT(V(surf.PointToClient(Cursor.Position))); surf.Invalidate();
+        };
+        surf.MouseWheel += wheel; tb.MouseWheel += wheel;
+        tb.TextChanged += (s, e) => surf.Invalidate();
+        tb.Enter += (s, e) => surf.Invalidate(); tb.Leave += (s, e) => surf.Invalidate();
+        tb.KeyDown += async (s, e) =>
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                e.SuppressKeyPress = true;
+                if (!busy && results.Count > 0 && sel >= 0 && tb.Text.Trim() == lastQ) DoPlay(); else await Search();
+            }
+            else if (e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; f.Close(); }
+            else if (e.KeyCode == Keys.A && e.Control) { e.SuppressKeyPress = true; tb.SelectAll(); }
+            else if ((e.KeyCode == Keys.Down || e.KeyCode == Keys.Up || e.KeyCode == Keys.PageDown || e.KeyCode == Keys.PageUp) && results.Count > 0 && !busy)
+            {
+                e.SuppressKeyPress = true; int d = e.KeyCode == Keys.Down ? 1 : e.KeyCode == Keys.Up ? -1 : e.KeyCode == Keys.PageDown ? 5 : -5;
+                sel = Math.Clamp((sel < 0 ? 0 : sel) + d, 0, results.Count - 1); note = ""; EnsVis(); surf.Invalidate();
+            }
+        };
+        f.FormClosed += (s, e) => { closed = true; anim.Stop(); anim.Dispose(); };
+        f.Shown += (s, e) => tb.Focus();
+        f.ShowDialog(this);
+        foreach (var tz in thumbs.Values) tz.Dispose(); thumbs.Clear(); bgB?.Dispose();
+        after?.Invoke();
     }
 
     // ---------- remember playlist + settings between launches ----------
@@ -1135,4 +1347,10 @@ class DarkColors : ProfessionalColorTable
     public override Color SeparatorLight => Bg;
     public override Color CheckBackground => Sel;
     public override Color CheckSelectedBackground => Sel;
+}
+
+// double-buffered surface for the custom-painted search dialog
+class DBuf : Control
+{
+    public DBuf() { SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true); }
 }
