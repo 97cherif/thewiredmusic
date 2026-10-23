@@ -217,7 +217,7 @@ class Wired : Form
         using (var za = System.IO.Compression.ZipFile.OpenRead(zip))
         {
             var en = za.Entries.First(x => x.FullName.EndsWith("/bin/ffmpeg.exe"));
-            en.ExtractToFile(exe, true);
+            System.IO.Compression.ZipFileExtensions.ExtractToFile(en, exe, true);
         }
         try { System.IO.File.Delete(zip); } catch { }
         return dir;
