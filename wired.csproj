@@ -7,6 +7,7 @@
     <Nullable>disable</Nullable>
     <AssemblyName>wired</AssemblyName>
     <Product>THE WIRED MUSIC</Product>
+    <ApplicationIcon>wired.ico</ApplicationIcon>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
@@ -16,5 +17,6 @@
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="TagLibSharp" Version="2.3.0" />
+    <EmbeddedResource Include="covers\*.jpg" LogicalName="cover.%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>
