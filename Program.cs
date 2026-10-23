@@ -28,7 +28,7 @@ class Tap : ISampleProvider
     public void Snap(float[] d) { lock (l) { for (int i = 0; i < d.Length; i++) d[i] = buf[(pos + i) % buf.Length]; } }
 }
 
-class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Bitmap Art; public bool Saved; }
+class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Bitmap Art; public bool Saved, HadTitle; }
 
 class Wired : Form
 {
@@ -125,17 +125,18 @@ class Wired : Form
                 try { if (Directory.Exists(p)) files.AddRange(Directory.EnumerateFiles(p, "*.*", SearchOption.AllDirectories)); else files.Add(p); } catch { }
             foreach (var f in files.Where(f => Ext.Contains(System.IO.Path.GetExtension(f).ToLower())).OrderBy(f => f))
             {
-                var t = new Track { Path = f, Title = System.IO.Path.GetFileNameWithoutExtension(f), Artist = "Unknown" };
+                var t = new Track { Path = f, Title = System.IO.Path.GetFileNameWithoutExtension(f), Artist = null };
                 try
                 {
                     using var tf = TagLib.File.Create(f);
-                    if (!string.IsNullOrWhiteSpace(tf.Tag.Title)) t.Title = tf.Tag.Title;
-                    if (tf.Tag.Performers.Length > 0) t.Artist = tf.Tag.Performers[0];
+                    if (!string.IsNullOrWhiteSpace(tf.Tag.Title)) { t.Title = tf.Tag.Title; t.HadTitle = true; }
+                    t.Artist = tf.Tag.Performers.FirstOrDefault(x => !Unk(x)) ?? tf.Tag.AlbumArtists.FirstOrDefault(x => !Unk(x)) ?? tf.Tag.Composers.FirstOrDefault(x => !Unk(x));
                     t.Album = tf.Tag.Album ?? ""; t.Year = tf.Tag.Year > 0 ? tf.Tag.Year.ToString() : "";
                     t.Dur = tf.Properties.Duration.TotalSeconds; t.Lyr = tf.Tag.Lyrics;
                     if (tf.Tag.Pictures.Length > 0) { using var ms = new MemoryStream(tf.Tag.Pictures[0].Data.Data); using var im = Image.FromStream(ms); t.Art = Square(im, 320); }
                 }
                 catch { }
+                Fix(t, f);
                 try
                 {
                     var lrc = System.IO.Path.ChangeExtension(f, ".lrc");
@@ -148,13 +149,80 @@ class Wired : Form
             {
                 BeginInvoke(new Action(() =>
                 {
-                    foreach (var t in made) t.Art ??= RandomCover();
+                    Sibling(made); foreach (var t in made) { if (Unk(t.Artist)) t.Artist = "Unknown"; t.Art ??= RandomCover(); }
                     pl.AddRange(made); St(made.Count == 0 ? "No audio files found" : "", made.Count == 0 ? 4000 : 0);
                     if (cur < 0 && pl.Count > 0) Play(0); else Invalidate();
                 }));
             }
             catch { }
         });
+    }
+
+    // ---------- artist recognition (works offline: tags, file name, folders, siblings, your corrections) ----------
+    static readonly string[] Generic = { "music", "downloads", "download", "songs", "desktop", "documents", "mp3", "audio", "new folder", "users", "media", "my music", "playlist", "playlists", "itunes", "sounds", "tracks", "unknown", "favorites", "favourites", "windows", "temp", "videos" };
+    static string OvFile => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic", "artists.txt");
+    static readonly Dictionary<string, string> ov = LoadOv();
+    static Dictionary<string, string> LoadOv()
+    {
+        var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try { foreach (var l in System.IO.File.ReadAllLines(OvFile)) { var i = l.IndexOf('\t'); if (i > 0) d[l.Substring(0, i)] = l.Substring(i + 1); } } catch { }
+        return d;
+    }
+    static bool Unk(string a) => string.IsNullOrWhiteSpace(a) || Regex.IsMatch(a.Trim(), @"^(unknown( artist)?|<unknown>|various( artists)?|va|n/?a|none|-)$", RegexOptions.IgnoreCase);
+    static string CleanName(string n)
+    {
+        n = n.Replace('_', ' ');
+        n = Regex.Replace(n, @"[\(\[\{][^\)\]\}]*(official|lyric|video|audio|hd|hq|4k|visuali[sz]er|remaster|clip|www\.|\.com|free download|explicit)[^\)\]\}]*[\)\]\}]", "", RegexOptions.IgnoreCase);
+        n = Regex.Replace(n, @"^\s*\d{1,3}\s*[-\.\)]\s*", "");
+        return Regex.Replace(n, @"\s{2,}", " ").Trim(' ', '-', '.');
+    }
+    static void Fix(Track t, string f)
+    {
+        lock (ov) if (ov.TryGetValue(f, out var o)) { t.Artist = o; return; }
+        var n = CleanName(System.IO.Path.GetFileNameWithoutExtension(f)); var p = Regex.Split(n, @"\s+[-–—]\s+");
+        if (p.Length >= 2 && p[0].Length > 0 && p[0].Length <= 50 && !Regex.IsMatch(p[0], @"^\d+$"))
+        {
+            if (Unk(t.Artist)) t.Artist = p[0].Trim();
+            if (!t.HadTitle) t.Title = string.Join(" - ", p.Skip(1)).Trim();
+        }
+        else if (!t.HadTitle && n.Length > 0) t.Title = n;
+    }
+    static string FolderArtist(string dir, string album)
+    {
+        if (string.IsNullOrEmpty(dir)) return null;
+        string Nm(string d) => string.IsNullOrEmpty(d) ? null : System.IO.Path.GetFileName(d.TrimEnd('\\', '/'));
+        bool Gen(string n) => string.IsNullOrWhiteSpace(n) || Generic.Contains(n.Trim().ToLower());
+        var name = Nm(dir); var pn = Nm(System.IO.Path.GetDirectoryName(dir));
+        if (!string.IsNullOrWhiteSpace(album) && name != null && name.Equals(album.Trim(), StringComparison.OrdinalIgnoreCase) && !Gen(pn)) return pn.Replace('_', ' ').Trim();
+        if (Gen(name)) return null;
+        var m = Regex.Split(name, @"\s+[-–—]\s+"); return (m.Length >= 2 ? m[0] : name).Replace('_', ' ').Trim();
+    }
+    static void Sibling(List<Track> made)
+    {
+        foreach (var g in made.Where(x => x.Path != null).GroupBy(x => System.IO.Path.GetDirectoryName(x.Path) ?? ""))
+        {
+            var known = g.Where(x => !Unk(x.Artist)).Select(x => x.Artist).ToList(); string guess = null;
+            if (known.Count > 0 && known.Distinct(StringComparer.OrdinalIgnoreCase).Count() == 1) guess = known[0];
+            else if (known.Count == 0) guess = FolderArtist(g.Key, g.Select(x => x.Album).FirstOrDefault(a => !string.IsNullOrWhiteSpace(a)));
+            if (guess != null) foreach (var x in g) if (Unk(x.Artist)) x.Artist = guess;
+        }
+    }
+    static Track YtFix(Track t)
+    {
+        var title = Regex.Replace(t.Title ?? "", @"[\(\[][^\)\]]*(official|lyric|video|audio|visuali[sz]er|hd|hq|4k)[^\)\]]*[\)\]]", "", RegexOptions.IgnoreCase).Trim();
+        var ch = Regex.Replace(t.Artist ?? "", @"\s*-\s*Topic$|VEVO$|\s*Official$", "", RegexOptions.IgnoreCase).Trim();
+        var p = Regex.Split(title, @"\s+[-–—]\s+");
+        if (p.Length >= 2 && p[0].Length <= 50) { t.Artist = p[0].Trim(); t.Title = string.Join(" - ", p.Skip(1)).Trim(); }
+        else { t.Artist = ch.Length > 0 ? ch : "YouTube"; if (title.Length > 0) t.Title = title; }
+        return t;
+    }
+    void SetArtist(int k)
+    {
+        if (k < 0 || k >= pl.Count) return; var t = pl[k];
+        var a = Ask("Artist for: " + t.Title, Unk(t.Artist) ? "" : t.Artist); if (string.IsNullOrWhiteSpace(a)) return;
+        t.Artist = a;
+        if (t.Path != null) { lock (ov) { ov[t.Path] = a; try { System.IO.File.WriteAllLines(OvFile, ov.Select(x => x.Key + "\t" + x.Value)); } catch { } } }
+        Invalidate();
     }
 
     // ---------- playback ----------
@@ -239,12 +307,12 @@ class Wired : Form
         var b = new Button { Text = t, Left = x, Top = y, Width = 110, Height = 30, FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(16, 26, 34), ForeColor = c, Font = new Font("Segoe UI", 9f), UseVisualStyleBackColor = false, Cursor = Cursors.Hand };
         b.FlatAppearance.BorderColor = Color.FromArgb(70, c.R, c.G, c.B); b.FlatAppearance.MouseOverBackColor = Color.FromArgb(26, 44, 56); return b;
     }
-    static string Ask(string title)
+    static string Ask(string title, string init = "")
     {
         using var f = new Form { FormBorderStyle = FormBorderStyle.None, Size = new Size(580, 132), StartPosition = FormStartPosition.CenterParent, BackColor = Color.FromArgb(10, 16, 22), ShowInTaskbar = false };
         f.Paint += (s, e) => { e.Graphics.DrawRectangle(Pe(Al(ICE, 60), 1), 0, 0, f.Width - 1, f.Height - 1); using var fn = new Font("Segoe UI", 9.5f); e.Graphics.DrawString(title, fn, Br(DM), 16, 14); };
         var tb = new TextBox { Left = 16, Top = 44, Width = 548, BorderStyle = BorderStyle.FixedSingle, BackColor = BG, ForeColor = ICE2, Font = new Font("Segoe UI", 10.5f) };
-        if (Clipboard.ContainsText() && Clipboard.GetText().Contains("youtu")) tb.Text = Clipboard.GetText().Trim();
+        tb.Text = init; if (init.Length == 0 && Clipboard.ContainsText() && Clipboard.GetText().Contains("youtu")) tb.Text = Clipboard.GetText().Trim();
         var ok = Flat("Add", 340, 86, ICE); ok.DialogResult = DialogResult.OK; var no = Flat("Cancel", 456, 86, TX); no.DialogResult = DialogResult.Cancel;
         f.Controls.Add(tb); f.Controls.Add(ok); f.Controls.Add(no); f.AcceptButton = ok; f.CancelButton = no; f.Shown += (s, e) => { tb.Focus(); tb.SelectAll(); };
         return f.ShowDialog() == DialogResult.OK ? tb.Text.Trim() : null;
@@ -306,8 +374,8 @@ class Wired : Form
             void One(System.Text.Json.JsonElement e, string ch)
             {
                 var id = S(e, "id"); var title = S(e, "title"); if (id == null || (title != null && title.StartsWith("["))) return;
-                pl.Add(new Track { Url = "https://www.youtube.com/watch?v=" + id, Title = title ?? "Untitled", Artist = S(e, "channel") ?? S(e, "uploader") ?? ch ?? "YouTube", Album = "YouTube", Art = RandomCover(),
-                    Dur = e.TryGetProperty("duration", out var du) && du.ValueKind == System.Text.Json.JsonValueKind.Number ? du.GetDouble() : 0 }); n++;
+                pl.Add(YtFix(new Track { Url = "https://www.youtube.com/watch?v=" + id, Title = title ?? "Untitled", Artist = S(e, "channel") ?? S(e, "uploader") ?? ch ?? "YouTube", Album = "YouTube", Art = RandomCover(),
+                    Dur = e.TryGetProperty("duration", out var du) && du.ValueKind == System.Text.Json.JsonValueKind.Number ? du.GetDouble() : 0 })); n++;
             }
             if (root.TryGetProperty("entries", out var en)) { var pc2 = S(root, "uploader") ?? S(root, "channel"); foreach (var e in en.EnumerateArray()) One(e, pc2); }
             else One(root, null);
@@ -704,7 +772,9 @@ class Wired : Form
     protected override void OnMouseDoubleClick(MouseEventArgs e) { var p = V(e.Location); if (p.Y < HdrH && Hit(p) == 0) Max(); }
     protected override void OnMouseDown(MouseEventArgs e)
     {
-        var p = V(e.Location); if (e.Button != MouseButtons.Left) return; int id = Hit(p);
+        var p = V(e.Location); int id = Hit(p);
+        if (e.Button == MouseButtons.Right) { if (id >= 100000) SetArtist(id % 100000); return; }
+        if (e.Button != MouseButtons.Left) return;
         if (p.Y < HdrH && id == 0) { ReleaseCapture(); SendMessage(Handle, 0xA1, 2, 0); return; }
         switch (id)
         {
@@ -783,8 +853,8 @@ class Wired : Form
                     foreach (var e in en.EnumerateArray())
                     {
                         var id = S(e, "id"); if (id == null) continue;
-                        results.Add(new Track { Url = "https://www.youtube.com/watch?v=" + id, Title = S(e, "title") ?? "Untitled", Artist = S(e, "channel") ?? S(e, "uploader") ?? "YouTube", Album = "YouTube",
-                            Dur = e.TryGetProperty("duration", out var du) && du.ValueKind == System.Text.Json.JsonValueKind.Number ? du.GetDouble() : 0 });
+                        results.Add(YtFix(new Track { Url = "https://www.youtube.com/watch?v=" + id, Title = S(e, "title") ?? "Untitled", Artist = S(e, "channel") ?? S(e, "uploader") ?? "YouTube", Album = "YouTube",
+                            Dur = e.TryGetProperty("duration", out var du) && du.ValueKind == System.Text.Json.JsonValueKind.Number ? du.GetDouble() : 0 }));
                         lb.Items.Add(id);
                     }
                 lbl.Text = results.Count == 0 ? "No results" : ""; if (lb.Items.Count > 0) lb.SelectedIndex = 0;
