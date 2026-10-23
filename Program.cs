@@ -49,13 +49,13 @@ class Wired : Form
         rVis = new(8, 318, 320, 240), rLyr = new(334, 318, 314, 240), rPl = new(656, 56, 336, 436), rSt = new(8, 566, 984, 24),
         rBF = new(656, 530, 108, 28), rDT = new(656, 496, 164, 28), rDA = new(826, 496, 166, 28), rBY = new(770, 530, 222, 28), rMin = new(918, 5, 22, 16), rMax = new(942, 5, 22, 16), rClose = new(966, 5, 22, 16);
     readonly Rectangle[] rb = { new(20, 260, 44, 44), new(70, 256, 52, 52), new(128, 260, 44, 44), new(190, 268, 32, 32), new(228, 268, 32, 32), new(266, 268, 32, 32) };
-    readonly Random R = new(); int gl; Point mp; bool dlBusy;
+    readonly Random R = new(); int gl; Point mp; bool dlBusy, dlCancel; System.Diagnostics.Process dlProc;
     readonly string[] menus = { "File", "View", "Playback", "Library", "Help" };
 
     public Wired()
     {
         Text = "THE WIRED MUSIC.exe"; FormBorderStyle = FormBorderStyle.None; StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(1000, 620); AllowDrop = true; KeyPreview = true;
+        ClientSize = new Size(1000, 620); AllowDrop = true; KeyPreview = true; try { Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath); } catch { }
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
         var rn = new Random(7); for (int i = 0; i < 300; i++) { sa[i] = (float)rn.NextDouble() * 6.28f; sr[i] = (float)rn.NextDouble(); }
         DragEnter += (s, e) => e.Effect = DragDropEffects.Copy;
@@ -64,6 +64,16 @@ class Wired : Form
         t.Tick += (s, e) => Tick(); t.Start();
         FormClosed += (s, e) => Stop();
     }
+
+    static readonly List<Image> Covers = LoadCovers();
+    static List<Image> LoadCovers()
+    {
+        var l = new List<Image>(); var asm = System.Reflection.Assembly.GetExecutingAssembly();
+        foreach (var n in asm.GetManifestResourceNames().Where(n => n.StartsWith("cover.")))
+            try { using var st = asm.GetManifestResourceStream(n); using var tmp = Image.FromStream(st); l.Add(new Bitmap(tmp)); } catch { }
+        return l;
+    }
+    Image RandomCover() => Covers.Count > 0 ? Covers[R.Next(Covers.Count)] : null;
 
     // ---------- library ----------
     void Add(IEnumerable<string> paths)
@@ -85,6 +95,7 @@ class Wired : Form
                 if (tf.Tag.Pictures.Length > 0) t.Art = Image.FromStream(new MemoryStream(tf.Tag.Pictures[0].Data.Data));
             }
             catch { }
+            t.Art ??= RandomCover();
             var lrc = System.IO.Path.ChangeExtension(f, ".lrc");
             if (string.IsNullOrWhiteSpace(t.Lyr) && System.IO.File.Exists(lrc))
                 t.Lyr = Regex.Replace(System.IO.File.ReadAllText(lrc), @"\[[^\]]*\]", "").Trim();
@@ -121,7 +132,7 @@ class Wired : Form
     static WaveStream Rd(string s) => s.StartsWith("http") ? (WaveStream)new MediaFoundationReader(s) : new AudioFileReader(s);
 
     // ---------- YouTube (via yt-dlp, downloaded automatically on first use) ----------
-    static async Task<string> Ytdlp(string args)
+    static async Task<string> Ytdlp(string args, Action<System.Diagnostics.Process> onStart = null)
     {
         var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic");
         Directory.CreateDirectory(dir); var exe = System.IO.Path.Combine(dir, "yt-dlp.exe");
@@ -132,36 +143,57 @@ class Wired : Form
         }
         var psi = new System.Diagnostics.ProcessStartInfo(exe, args) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true, StandardOutputEncoding = System.Text.Encoding.UTF8 };
         psi.Environment["PYTHONIOENCODING"] = "utf-8"; psi.Environment["PYTHONUTF8"] = "1";
-        using var p = System.Diagnostics.Process.Start(psi);
+        using var p = System.Diagnostics.Process.Start(psi); onStart?.Invoke(p);
         var o = await p.StandardOutput.ReadToEndAsync(); await p.WaitForExitAsync(); return o;
+    }
+    static Button Flat(string t, int x, int y, Color c)
+    {
+        var b = new Button { Text = t, Left = x, Top = y, Width = 110, Height = 28, FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(14, 22, 40), ForeColor = c, Font = new Font("Consolas", 9f), UseVisualStyleBackColor = false };
+        b.FlatAppearance.BorderColor = c; b.FlatAppearance.MouseOverBackColor = SEL; return b;
     }
     static string Ask(string title)
     {
-        using var f = new Form { Text = title, Width = 540, Height = 130, FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false, BackColor = PN, ForeColor = TX };
-        var tb = new TextBox { Left = 10, Top = 12, Width = 500 }; var ok = new Button { Text = "Connect", Left = 420, Top = 45, DialogResult = DialogResult.OK };
-        f.Controls.Add(tb); f.Controls.Add(ok); f.AcceptButton = ok;
+        using var f = new Form { FormBorderStyle = FormBorderStyle.None, Size = new Size(580, 128), StartPosition = FormStartPosition.CenterParent, BackColor = PN, ShowInTaskbar = false };
+        f.Paint += (s, e) => { using var p = new Pen(HI); e.Graphics.DrawRectangle(p, 0, 0, f.Width - 1, f.Height - 1); using var p2 = new Pen(LN); e.Graphics.DrawLine(p2, 0, 34, f.Width, 34); using var fn = new Font("Consolas", 9f); using var b = new SolidBrush(HI); e.Graphics.DrawString(title.ToUpper(), fn, b, 14, 11); };
+        var tb = new TextBox { Left = 14, Top = 46, Width = 552, BorderStyle = BorderStyle.FixedSingle, BackColor = BG, ForeColor = HI, Font = new Font("Consolas", 10f) };
+        if (Clipboard.ContainsText() && Clipboard.GetText().Contains("youtu")) tb.Text = Clipboard.GetText().Trim();
+        var ok = Flat("CONNECT", 340, 84, RED); ok.DialogResult = DialogResult.OK; var no = Flat("CANCEL", 456, 84, TX); no.DialogResult = DialogResult.Cancel;
+        f.Controls.Add(tb); f.Controls.Add(ok); f.Controls.Add(no); f.AcceptButton = ok; f.CancelButton = no; f.Shown += (s, e) => { tb.Focus(); tb.SelectAll(); };
         return f.ShowDialog() == DialogResult.OK ? tb.Text.Trim() : null;
     }
+    static void About()
+    {
+        using var f = new Form { FormBorderStyle = FormBorderStyle.None, Size = new Size(420, 220), StartPosition = FormStartPosition.CenterParent, BackColor = PN, ShowInTaskbar = false };
+        f.Paint += (s, e) =>
+        {
+            var g = e.Graphics; using var p = new Pen(HI); g.DrawRectangle(p, 0, 0, f.Width - 1, f.Height - 1); using var fn = new Font("Consolas", 10f); using var b = new SolidBrush(TX); using var sf = new StringFormat { Alignment = StringAlignment.Center };
+            g.DrawString("THE WIRED MUSIC.exe\nwired.exe  build 1999.12\n\nWHERE MUSIC MEETS THE WIRED\n\nNO MATTER WHERE YOU ARE,\nEVERYONE IS ALWAYS CONNECTED.", fn, b, new RectangleF(0, 18, f.Width, 160), sf);
+        };
+        var ok = Flat("OK", 155, 180, HI); ok.DialogResult = DialogResult.OK; f.Controls.Add(ok); f.AcceptButton = ok; f.CancelButton = ok; f.ShowDialog();
+    }
+    void StopDl() { dlCancel = true; status = "Stopping download..."; try { dlProc?.Kill(true); } catch { } }
     async void Download(List<Track> list)
     {
         list = list.Where(t => t.Url != null).ToList();
         if (list.Count == 0) { status = "Nothing to download - add a YouTube link first"; return; }
-        if (dlBusy) { status = "A download is already running"; return; }
+        if (dlBusy) { status = "A download is already running - press STOP to cancel it"; return; }
         using var d = new FolderBrowserDialog { Description = "Choose where to save the music" };
         if (d.ShowDialog() != DialogResult.OK) return;
-        dlBusy = true; int ok = 0; var tpl = System.IO.Path.Combine(d.SelectedPath, "%(title)s.%(ext)s");
+        dlBusy = true; dlCancel = false; var t0 = DateTime.Now; int ok = 0; var tpl = System.IO.Path.Combine(d.SelectedPath, "%(title)s.%(ext)s");
         for (int i = 0; i < list.Count; i++)
         {
+            if (dlCancel) break;
             var t = list[i]; status = $"Downloading {i + 1}/{list.Count}: {t.Title}";
             try
             {
-                var o = await Ytdlp($"-f \"bestaudio[ext=m4a]/bestaudio\" --no-playlist --no-warnings --no-simulate --print after_move:filepath -o \"{tpl}\" \"{t.Url}\"");
+                var o = await Ytdlp($"-f \"bestaudio[ext=m4a]/bestaudio\" --no-playlist --no-warnings --no-simulate --print after_move:filepath -o \"{tpl}\" \"{t.Url}\"", p => dlProc = p);
                 var path = o.Trim().Split('\n').Last().Trim();
                 if (System.IO.File.Exists(path)) { ok++; t.Saved = true; }
             }
             catch { }
         }
-        dlBusy = false; status = $"Downloaded {ok}/{list.Count} to {d.SelectedPath}";
+        if (dlCancel) { try { foreach (var f in Directory.GetFiles(d.SelectedPath)) if ((f.EndsWith(".part") || f.EndsWith(".ytdl")) && System.IO.File.GetLastWriteTime(f) >= t0.AddSeconds(-2)) System.IO.File.Delete(f); } catch { } }
+        dlBusy = false; dlProc = null; status = dlCancel ? $"Download stopped - {ok} song(s) kept in {d.SelectedPath}" : $"Downloaded {ok}/{list.Count} to {d.SelectedPath}";
     }
     void OpenYt() { var u = Ask("Paste a YouTube video or playlist link"); if (!string.IsNullOrEmpty(u)) AddYt(u); }
     async void AddYt(string url)
@@ -175,7 +207,7 @@ class Wired : Form
             void One(System.Text.Json.JsonElement e, string ch)
             {
                 var id = S(e, "id"); var title = S(e, "title"); if (id == null || (title != null && title.StartsWith("["))) return;
-                pl.Add(new Track { Url = "https://www.youtube.com/watch?v=" + id, Title = title ?? "Untitled", Artist = S(e, "channel") ?? S(e, "uploader") ?? ch ?? "YouTube", Album = "YouTube",
+                pl.Add(new Track { Url = "https://www.youtube.com/watch?v=" + id, Title = title ?? "Untitled", Artist = S(e, "channel") ?? S(e, "uploader") ?? ch ?? "YouTube", Album = "YouTube", Art = RandomCover(),
                     Dur = e.TryGetProperty("duration", out var du) && du.ValueKind == System.Text.Json.JsonValueKind.Number ? du.GetDouble() : 0 }); n++;
             }
             if (root.TryGetProperty("entries", out var en)) { var pc = S(root, "uploader") ?? S(root, "channel"); foreach (var e in en.EnumerateArray()) One(e, pc); }
@@ -214,7 +246,7 @@ class Wired : Form
         var b = new float[48];
         if (playing && tap != null)
         {
-            var s = tap.Snap(); var c = new Complex[1024];
+            var s = tap.Snap(); wave = s; var c = new Complex[1024];
             for (int i = 0; i < 1024; i++) { c[i].X = s[i] * (float)FastFourierTransform.HammingWindow(i, 1024); c[i].Y = 0; }
             FastFourierTransform.FFT(true, 10, c);
             for (int k = 0; k < 48; k++)
@@ -225,7 +257,25 @@ class Wired : Form
             }
         }
         for (int k = 0; k < 48; k++) bars[k] = Math.Max(b[k], bars[k] * .88f);
-        Invalidate();
+        Vis(); Invalidate();
+    }
+
+    // ---------- visualiser engine ----------
+    float[] wave; float bassAvg, flash; int beatCd, shI, pI;
+    readonly float[] shR = new float[6], shA = new float[6], pA = new float[140], pR = new float[140], pV = new float[140], pL = new float[140];
+    void Vis()
+    {
+        if (!playing) wave = null;
+        float bass = 0; for (int k = 0; k < 5; k++) bass += bars[k]; bass /= 5;
+        if (beatCd > 0) beatCd--;
+        if (playing && beatCd == 0 && bass > bassAvg * 1.3f + .06f)
+        {
+            beatCd = 7; flash = 1; shR[shI] = 0; shA[shI] = 1; shI = (shI + 1) % shR.Length; gl = Math.Max(gl, 2);
+            for (int n = 0; n < 14; n++) { pA[pI] = (float)(R.NextDouble() * 6.283); pR[pI] = 46; pV[pI] = 1.2f + (float)R.NextDouble() * 2.5f; pL[pI] = 1; pI = (pI + 1) % pA.Length; }
+        }
+        bassAvg += (bass - bassAvg) * .06f; flash *= .86f;
+        for (int k = 0; k < shR.Length; k++) if (shA[k] > 0) { shR[k] += 3.2f; shA[k] -= .03f; }
+        for (int k = 0; k < pA.Length; k++) if (pL[k] > 0) { pR[k] += pV[k]; pL[k] -= .025f; }
     }
 
     // ---------- drawing ----------
@@ -287,14 +337,14 @@ class Wired : Form
     {
         var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         var T = cur >= 0 ? pl[cur] : null; int now = Environment.TickCount; if (R.Next(250) == 0) gl = 4;
-        g.Clear(BG);
+        g.Clear(BG); { float s0 = Sc; g.TranslateTransform((ClientSize.Width - 1000 * s0) / 2, (ClientSize.Height - 620 * s0) / 2); g.ScaleTransform(s0, s0); }
         using (var gp = new GraphicsPath()) { gp.AddEllipse(450, -140, 800, 520); using var pb = new PathGradientBrush(gp) { CenterColor = A(HI, 34), SurroundColors = new[] { A(HI, 0) } }; g.FillPath(pb, gp); }
         using (var p = new Pen(A(HI, 10))) { for (int x = 0; x < 1000; x += 20) g.DrawLine(p, x, 0, x, 620); for (int y = 0; y < 620; y += 20) g.DrawLine(p, 0, y, 1000, y); }
         using (var p = new Pen(LN)) g.DrawRectangle(p, 0, 0, 999, 619);
 
         // title bar + menu
         using (var lb = new LinearGradientBrush(new Rectangle(0, 0, 1000, 26), Color.FromArgb(16, 30, 54), Color.FromArgb(6, 10, 20), 90f)) g.FillRectangle(lb, 0, 0, 1000, 26);
-        using (var p = new Pen(HI, 1.5f)) { g.DrawEllipse(p, 7, 6, 14, 14); g.DrawEllipse(p, 11, 10, 6, 6); }
+        using (var p = new Pen(HI, 1.5f)) { g.DrawEllipse(p, 7, 6, 14, 14); g.DrawEllipse(p, 11, 10, 6, 6); } Fill(g, RED, new Rectangle(13, 12, 2, 2));
         int ca = gl > 0 ? 3 : 1; Tx(g, "THE WIRED MUSIC.exe", FA, A(RED, 170), 30 + ca, 5); Tx(g, "THE WIRED MUSIC.exe", FA, A(HI, 170), 30 - ca, 5); Tx(g, "THE WIRED MUSIC.exe", FA, Color.White, 30, 5);
         WinBtn(g, rMin, 0); WinBtn(g, rMax, 1); WinBtn(g, rClose, 2);
         Fill(g, A(PN, 220), new Rectangle(1, 26, 998, 24)); Ln(g, LN, 0, 50, 1000, 50);
@@ -303,7 +353,7 @@ class Wired : Form
 
         // now playing
         Pn(g, rA, "NOW PLAYING", "LAYER 01 / PRESENT DAY, PRESENT TIME");
-        if (T?.Art != null) { g.DrawImage(T.Art, rArt); Fill(g, Color.FromArgb(70, 0, 50, 110), rArt); }
+        if (T?.Art != null) { { int iw = T.Art.Width, ih = T.Art.Height, sq = Math.Min(iw, ih); g.DrawImage(T.Art, rArt, (iw - sq) / 2, (ih - sq) / 2, sq, sq, GraphicsUnit.Pixel); } Fill(g, Color.FromArgb(70, 0, 50, 110), rArt); }
         else
         {
             using (var lb = new LinearGradientBrush(rArt, Color.FromArgb(18, 40, 80), Color.FromArgb(4, 8, 18), 90f)) g.FillRectangle(lb, rArt);
@@ -341,18 +391,34 @@ class Wired : Form
 
         // visualisation
         Pn(g, rVis, "VISUALISATION", "SIGNAL");
-        var ir = new Rectangle(rVis.X + 1, rVis.Y + 21, rVis.Width - 2, rVis.Height - 22); g.SetClip(ir); Fill(g, BG, ir);
-        float cx = ir.X + ir.Width / 2f, cy = ir.Y + ir.Height / 2f, rot = now / 6000f, avg = bars.Average();
-        using (var p = new Pen(A(HI, 28))) { for (int rr = 30; rr <= 130; rr += 20) g.DrawEllipse(p, cx - rr, cy - rr, 2 * rr, 2 * rr); g.DrawLine(p, ir.X, cy, ir.Right, cy); g.DrawLine(p, cx, ir.Y, cx, ir.Bottom); }
-        using (var p = new Pen(HI, 2f))
-            for (int k = 0; k < 48; k++)
-            {
-                double a2 = k / 48.0 * Math.PI * 2 + rot; float r0 = 34 + avg * 14, r1 = r0 + 4 + bars[k] * 75;
-                g.DrawLine(p, cx + (float)Math.Cos(a2) * r0, cy + (float)Math.Sin(a2) * r0, cx + (float)Math.Cos(a2) * r1, cy + (float)Math.Sin(a2) * r1);
-            }
-        Fill(g, A(Color.White, 210), new Rectangle((int)cx - 3, (int)cy - 3, 6, 6));
-        for (int k = 0; k < 30; k++) Fill(g, A(HI, R.Next(30, 120)), new Rectangle(R.Next(ir.X, ir.Right), R.Next(ir.Y, ir.Bottom), 1, 1));
-        g.ResetClip(); Tx(g, "LVL " + avg.ToString("0.00"), FM, DM, ir.X + 8, ir.Bottom - 16);
+        var ir = new Rectangle(rVis.X + 1, rVis.Y + 21, rVis.Width - 2, rVis.Height - 22); g.SetClip(ir); Fill(g, BG, ir); Fill(g, A(HI, (int)(flash * 24)), ir);
+        float cx = ir.X + ir.Width / 2f, cy = ir.Y + ir.Height / 2f - 4, bs = 46, avg = bars.Average();
+        for (int col = 0; col < 2; col++) for (int rw = 0; rw < 13; rw++)
+        { int hv = (int)(((uint)(now / 140 + rw * 7 + col * 31) * 2654435761u) >> 24); Tx(g, hv.ToString("X2"), FM, A(HI, 26 + (rw * 5 + now / 50) % 40), col == 0 ? ir.X + 6 : ir.Right - 24, ir.Y + 6 + rw * 16); }
+        using (var p = new Pen(A(HI, 22))) { g.DrawLine(p, ir.X, cy, ir.Right, cy); g.DrawLine(p, cx, ir.Y, cx, ir.Bottom); }
+        using (var p = new Pen(A(HI, 70), 1f) { DashPattern = new float[] { 2, 6 }, DashOffset = now / 60f }) g.DrawEllipse(p, cx - bs - 50, cy - bs - 50, 2 * (bs + 50), 2 * (bs + 50));
+        using (var p = new Pen(A(HI, 45), 1f) { DashPattern = new float[] { 8, 10 }, DashOffset = -now / 40f }) g.DrawEllipse(p, cx - bs - 74, cy - bs - 74, 2 * (bs + 74), 2 * (bs + 74));
+        for (int k = 0; k < shR.Length; k++) if (shA[k] > 0) using (var p = new Pen(A(HI, (int)(shA[k] * 170)), 1.5f)) { float rr = bs + shR[k]; g.DrawEllipse(p, cx - rr, cy - rr, 2 * rr, 2 * rr); }
+        for (int k = 0; k < pA.Length; k++) if (pL[k] > 0) Fill(g, A(k % 3 == 0 ? RED : HI, (int)(pL[k] * 220)), new Rectangle((int)(cx + Math.Cos(pA[k]) * pR[k]), (int)(cy + Math.Sin(pA[k]) * pR[k]), 2, 2));
+        var pts = new PointF[96]; var pts2 = new PointF[96];
+        for (int k = 0; k < 96; k++)
+        {
+            int ix = k < 48 ? k : 95 - k; double an = k / 96.0 * Math.PI * 2 + Math.PI / 2; float rr = bs + 3 + bars[ix] * 52 + flash * 6;
+            pts[k] = new PointF(cx + (float)Math.Cos(an) * rr, cy + (float)Math.Sin(an) * rr); pts2[k] = new PointF(pts[k].X + 2 + flash * 5, pts[k].Y);
+        }
+        using (var fb = new SolidBrush(A(HI, 26))) g.FillClosedCurve(fb, pts, FillMode.Winding, .35f);
+        using (var p = new Pen(A(RED, 150), 1.5f)) g.DrawClosedCurve(p, pts2, .35f, FillMode.Winding);
+        using (var p = new Pen(HI, 2f)) g.DrawClosedCurve(p, pts, .35f, FillMode.Winding);
+        var wp = new PointF[128];
+        for (int k = 0; k < 128; k++)
+        {
+            double an = k / 128.0 * Math.PI * 2; float w = wave != null ? Math.Clamp(wave[k * 8] * 26, -20, 20) : (float)Math.Sin(now / 400.0 + k * .35) * 1.5f; float rr = bs * .62f + w;
+            wp[k] = new PointF(cx + (float)Math.Cos(an) * rr, cy + (float)Math.Sin(an) * rr);
+        }
+        using (var p = new Pen(A(Color.White, 190), 1.2f)) g.DrawClosedCurve(p, wp, .3f, FillMode.Winding);
+        using (var p = new Pen(A(RED, (int)(flash * 230)), 1.5f)) g.DrawEllipse(p, cx - 6 - flash * 10, cy - 6 - flash * 10, 12 + flash * 20, 12 + flash * 20);
+        Fill(g, Color.White, new Rectangle((int)cx - 2, (int)cy - 2, 4, 4));
+        g.ResetClip(); Tx(g, "LVL " + avg.ToString("0.00"), FM, DM, ir.X + 8, ir.Bottom - 16); Tx(g, playing ? "LIVE" : "IDLE", FM, playing ? RED : DM, ir.Right - 40, ir.Bottom - 16);
 
         // lyrics
         Pn(g, rLyr, "LYRICS", "1/1");
@@ -376,7 +442,7 @@ class Wired : Form
         }
         Bev(g, rBF, rBF.Contains(mp), false, false); Ctr(g, "+ FILES", FM, TX, rBF);
         Bev(g, rDT, rDT.Contains(mp), false, false); Ctr(g, "↓ THIS SONG", FM, TX, rDT);
-        Bev(g, rDA, rDA.Contains(mp), dlBusy, false); Ctr(g, dlBusy ? "DOWNLOADING..." : "↓ DOWNLOAD ALL", FM, dlBusy ? RED : TX, rDA);
+        Bev(g, rDA, rDA.Contains(mp), dlBusy, false, dlBusy ? RED : (Color?)null); Ctr(g, dlBusy ? "■ STOP DOWNLOAD" : "↓ DOWNLOAD ALL", FM, dlBusy ? RED : TX, rDA);
         Bev(g, rBY, rBY.Contains(mp), true, false, RED); Ctr(g, "+ ADD YT LINK", FM, Color.White, rBY);
         g.FillPolygon(new SolidBrush(RED), new[] { new PointF(rBY.X + 14, rBY.Y + 9), new PointF(rBY.X + 14, rBY.Y + 19), new PointF(rBY.X + 23, rBY.Y + 14) });
 
@@ -397,6 +463,12 @@ class Wired : Form
     }
 
     // ---------- input ----------
+    float Sc => Math.Max(.1f, Math.Min(ClientSize.Width / 1000f, ClientSize.Height / 620f));
+    Point V(Point p) { float k = Sc, ox = (ClientSize.Width - 1000 * k) / 2, oy = (ClientSize.Height - 620 * k) / 2; return new Point((int)((p.X - ox) / k), (int)((p.Y - oy) / k)); }
+    Point C(int x, int y) { float k = Sc, ox = (ClientSize.Width - 1000 * k) / 2, oy = (ClientSize.Height - 620 * k) / 2; return new Point((int)(ox + x * k), (int)(oy + y * k)); }
+    void Max() { MaximizedBounds = Screen.FromControl(this).WorkingArea; WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized; }
+    protected override void OnMouseDoubleClick(MouseEventArgs e) { var q = V(e.Location); if (q.Y < 26 && !rClose.Contains(q) && !rMin.Contains(q) && !rMax.Contains(q)) Max(); }
+    protected override void OnResize(EventArgs e) { base.OnResize(e); Invalidate(); }
     int MenuX(int i) => new[] { 10, 56, 100, 175, 240 }[i];
     void Seek(int x) { if (rd == null) return; var f = Math.Clamp((x - rSeek.X) / (double)rSeek.Width, 0, .999); rd.CurrentTime = TimeSpan.FromSeconds(rd.TotalTime.TotalSeconds * f); }
     void SetVol(int x) { vol = Math.Clamp((x - rVol.X) / (float)rVol.Width, 0, 1); Vol(); }
@@ -404,27 +476,27 @@ class Wired : Form
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
-        var p = e.Location; if (e.Button != MouseButtons.Left) return;
+        var p = V(e.Location); if (e.Button != MouseButtons.Left) return;
         if (p.Y < 26)
         {
             if (rClose.Contains(p)) Close(); else if (rMin.Contains(p)) WindowState = FormWindowState.Minimized;
-            else if (!rMax.Contains(p)) { ReleaseCapture(); SendMessage(Handle, 0xA1, 2, 0); }
+            else if (rMax.Contains(p)) Max(); else { ReleaseCapture(); SendMessage(Handle, 0xA1, 2, 0); }
             return;
         }
         if (p.Y < 50) { for (int i = 4; i >= 0; i--) if (p.X >= MenuX(i) - 4) { ShowMenu(i); break; } return; }
         if (Rectangle.Inflate(rSeek, 0, 8).Contains(p)) { dragSeek = true; Seek(p.X); return; }
         if (Rectangle.Inflate(rVol, 6, 8).Contains(p)) { dragVol = true; SetVol(p.X); return; }
         if (rDT.Contains(p)) { if (cur >= 0) Download(new List<Track> { pl[cur] }); return; }
-        if (rDA.Contains(p)) { Download(pl.ToList()); return; }
+        if (rDA.Contains(p)) { if (dlBusy) StopDl(); else Download(pl.ToList()); return; }
         if (rBF.Contains(p)) { PickFiles(); return; }
         if (rBY.Contains(p)) { OpenYt(); return; }
         for (int i = 0; i < 6; i++)
             if (rb[i].Contains(p)) { if (i == 0) Prev(); else if (i == 1) Toggle(); else if (i == 2) Next(); else if (i == 3) rep = !rep; else if (i == 4) shuf = !shuf; else { mute = !mute; Vol(); } return; }
         if (rPl.Contains(p) && p.Y > rPl.Y + 26) { int k = scroll + (p.Y - rPl.Y - 26) / 17; if (k < pl.Count) { if (pl[k].Url != null && p.X > rPl.Right - 28) Download(new List<Track> { pl[k] }); else Play(k); } }
     }
-    protected override void OnMouseMove(MouseEventArgs e) { mp = e.Location; if (dragSeek) Seek(e.X); if (dragVol) SetVol(e.X); }
+    protected override void OnMouseMove(MouseEventArgs e) { mp = V(e.Location); if (dragSeek) Seek(mp.X); if (dragVol) SetVol(mp.X); }
     protected override void OnMouseUp(MouseEventArgs e) { dragSeek = dragVol = false; }
-    protected override void OnMouseWheel(MouseEventArgs e) { if (rPl.Contains(e.Location)) scroll = Math.Clamp(scroll - Math.Sign(e.Delta) * 3, 0, Math.Max(0, pl.Count - 1)); }
+    protected override void OnMouseWheel(MouseEventArgs e) { if (rPl.Contains(V(e.Location))) scroll = Math.Clamp(scroll - Math.Sign(e.Delta) * 3, 0, Math.Max(0, pl.Count - 1)); }
     protected override void OnKeyDown(KeyEventArgs e)
     {
         if (e.Control && e.KeyCode == Keys.V && Clipboard.ContainsText() && Clipboard.GetText().Contains("youtu")) AddYt(Clipboard.GetText().Trim());
@@ -433,7 +505,7 @@ class Wired : Form
 
     void ShowMenu(int i)
     {
-        var m = new ContextMenuStrip { BackColor = PN, ForeColor = TX, Font = F };
+        var m = new ContextMenuStrip { BackColor = PN, ForeColor = TX, Font = F, ShowImageMargin = false, Renderer = new ToolStripProfessionalRenderer(new DarkColors()) { RoundedEdges = false } };
         void A(string t, Action a) => m.Items.Add(t, null, (s, e) => a());
         void OpenFiles() { using var d = new OpenFileDialog { Multiselect = true, Filter = "Audio|*.mp3;*.flac;*.wav;*.ogg;*.m4a;*.aac;*.wma" }; if (d.ShowDialog() == DialogResult.OK) Add(d.FileNames); }
         void OpenDir() { using var d = new FolderBrowserDialog(); if (d.ShowDialog() == DialogResult.OK) Add(new[] { d.SelectedPath }); }
@@ -443,8 +515,24 @@ class Wired : Form
             case 1: A(crt ? "CRT scanlines: on" : "CRT scanlines: off", () => crt = !crt); break;
             case 2: A("Play / Pause", Toggle); A("Previous", Prev); A("Next", Next); A("Shuffle", () => shuf = !shuf); A("Repeat", () => rep = !rep); break;
             case 3: A("Add folder...", OpenDir); A("Add YouTube link...", OpenYt); A("Clear playlist", () => { Stop(); pl.Clear(); cur = -1; scroll = 0; status = "NOT CONNECTED"; }); break;
-            case 4: A("About THE WIRED MUSIC", () => MessageBox.Show("THE WIRED MUSIC.exe\nwired.exe  build 1999.12\n\nWHERE MUSIC MEETS THE WIRED\n\nNO MATTER WHERE YOU ARE,\nEVERYONE IS ALWAYS CONNECTED.", "THE WIRED MUSIC", MessageBoxButtons.OK, MessageBoxIcon.Information)); break;
+            case 4: A("About THE WIRED MUSIC", About); break;
         }
-        m.Show(this, new Point(MenuX(i) - 4, 52));
+        m.Show(this, C(MenuX(i) - 4, 52));
     }
+}
+
+class DarkColors : ProfessionalColorTable
+{
+    static readonly Color Bg = Color.FromArgb(8, 12, 22), Sel = Color.FromArgb(22, 56, 96), Bd = Color.FromArgb(40, 72, 112);
+    public override Color ToolStripDropDownBackground => Bg;
+    public override Color ImageMarginGradientBegin => Bg;
+    public override Color ImageMarginGradientMiddle => Bg;
+    public override Color ImageMarginGradientEnd => Bg;
+    public override Color MenuBorder => Color.FromArgb(127, 233, 255);
+    public override Color MenuItemBorder => Color.FromArgb(127, 233, 255);
+    public override Color MenuItemSelected => Sel;
+    public override Color MenuItemSelectedGradientBegin => Sel;
+    public override Color MenuItemSelectedGradientEnd => Sel;
+    public override Color SeparatorDark => Bd;
+    public override Color SeparatorLight => Bg;
 }
