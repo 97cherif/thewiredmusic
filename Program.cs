@@ -272,6 +272,16 @@ class Wired : Form
         {
             if (dlCancel) break;
             var t = list[i]; St($"Downloading {i + 1}/{list.Count}: {t.Title}");
+            var cf = CachedFile(t.Url);
+            if (cf != null)
+            {
+                try
+                {
+                    var nm = string.Concat(t.Title.Select(c => System.IO.Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+                    System.IO.File.Copy(cf, System.IO.Path.Combine(d.SelectedPath, nm + ".mp3"), true); ok++; t.Saved = true; continue;
+                }
+                catch { }
+            }
             try
             {
                 var ff = await Ffmpeg(msg => St(msg));
@@ -305,33 +315,56 @@ class Wired : Form
         }
         catch (Exception ex) { St("Couldn't connect: " + ex.Message, 6000); }
     }
+    // ---------- instant YouTube playback: stream now, build the MP3 cache in the background ----------
+    static string CacheDir() { var d = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic", "cache"); Directory.CreateDirectory(d); return d; }
+    static string IdOf(string url) { var m = Regex.Match(url ?? "", @"v=([\w-]+)"); return m.Success ? m.Groups[1].Value : null; }
+    static string CachedFile(string url) { var id = IdOf(url); if (id == null) return null; var f = System.IO.Path.Combine(CacheDir(), id + ".mp3"); return System.IO.File.Exists(f) ? f : null; }
+    static readonly Dictionary<string, (string u, int t)> sc = new();
+    static async Task<string> Resolve(string url)
+    {
+        lock (sc) if (sc.TryGetValue(url, out var c) && Environment.TickCount - c.t < 1200000) return c.u;
+        var u = (await Ytdlp($"-f \"bestaudio[ext=m4a]/bestaudio\" -g --no-playlist --no-warnings \"{url}\"")).Trim().Split('\n')[0].Trim();
+        if (!u.StartsWith("http")) throw new Exception("no stream found - delete %LocalAppData%\\TheWiredMusic\\yt-dlp.exe to update it");
+        lock (sc) sc[url] = (u, Environment.TickCount); return u;
+    }
+    static readonly SemaphoreSlim cvLock = new(1, 1);
+    static async Task CacheMp3(string url)
+    {
+        var id = IdOf(url); if (id == null || CachedFile(url) != null) return;
+        await cvLock.WaitAsync();
+        try
+        {
+            if (CachedFile(url) != null) return; var dir = CacheDir(); var ff = await Ffmpeg();
+            await Ytdlp($"-f bestaudio -x --audio-format mp3 --audio-quality 0 --ffmpeg-location \"{ff}\" --no-playlist --no-warnings -o \"{System.IO.Path.Combine(dir, id)}.%(ext)s\" \"{url}\"");
+        }
+        catch { }
+        finally { cvLock.Release(); }
+    }
+    void Prefetch()
+    {
+        if (shuf || pl.Count < 2 || cur < 0) return; var n = pl[(cur + 1) % pl.Count]; if (n.Url == null || CachedFile(n.Url) != null) return;
+        var u = n.Url; Task.Run(async () => { try { await Resolve(u); } catch { } });
+    }
+    void StartStream(string src)
+    {
+        try
+        {
+            rd = Rd(src); vsp = new VolumeSampleProvider(rd.ToSampleProvider()) { Volume = mute ? 0 : vol }; tap = new Tap(vsp);
+            wo = new WaveOutEvent { DesiredLatency = 250, NumberOfBuffers = 3 }; wo.Init(tap.ToWaveProvider()); wo.Play(); playing = true; St(""); Prefetch();
+        }
+        catch (Exception ex) { St("Couldn't play: " + ex.Message, 6000); }
+    }
     void Tune(int i, int my)
     {
-        var t = pl[i]; St("Preparing song...");
+        var t = pl[i]; var local = CachedFile(t.Url);
+        if (local != null) { StartStream(local); return; } // already converted: plays instantly from disk
+        St("Loading...");
         Task.Run(async () =>
         {
             try
             {
-                var m = Regex.Match(t.Url, @"v=([\w-]+)"); var id = m.Success ? m.Groups[1].Value : Guid.NewGuid().ToString("N");
-                var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic", "cache"); Directory.CreateDirectory(dir);
-                var file = System.IO.Path.Combine(dir, id + ".mp3");
-                if (!System.IO.File.Exists(file))
-                {
-                    var ff = await Ffmpeg(msg => BeginInvoke(new Action(() => { if (my == gen) St(msg); }))); 
-                    BeginInvoke(new Action(() => { if (my == gen) St("Converting to MP3..."); }));
-                    await Ytdlp($"-f bestaudio -x --audio-format mp3 --audio-quality 0 --ffmpeg-location \"{ff}\" --no-playlist --no-warnings -o \"{System.IO.Path.Combine(dir, id)}.%(ext)s\" \"{t.Url}\"");
-                }
-                if (!System.IO.File.Exists(file)) throw new Exception("conversion failed - delete %LocalAppData%\\TheWiredMusic to reset");
-                BeginInvoke(new Action(() =>
-                {
-                    if (my != gen) return;
-                    try
-                    {
-                        rd = Rd(file); vsp = new VolumeSampleProvider(rd.ToSampleProvider()) { Volume = mute ? 0 : vol }; tap = new Tap(vsp);
-                        wo = new WaveOutEvent { DesiredLatency = 250, NumberOfBuffers = 3 }; wo.Init(tap.ToWaveProvider()); wo.Play(); playing = true; St("");
-                    }
-                    catch (Exception ex) { St("Couldn't play: " + ex.Message, 6000); }
-                }));
+                var u = await Resolve(t.Url);
+                BeginInvoke(new Action(() => { if (my != gen) return; StartStream(u); _ = CacheMp3(t.Url); }));
             }
             catch (Exception ex) { BeginInvoke(new Action(() => { if (my == gen) St("Couldn't play: " + ex.Message, 6000); })); }
         });
