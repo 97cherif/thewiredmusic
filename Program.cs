@@ -28,6 +28,9 @@ class Tap : ISampleProvider
     public void Snap(float[] d) { lock (l) { for (int i = 0; i < d.Length; i++) d[i] = buf[(pos + i) % buf.Length]; } }
 }
 
+class PersistTrack { public string Url { get; set; } public string Path { get; set; } public string Title { get; set; } public string Artist { get; set; } public string Album { get; set; } public string Year { get; set; } public double Dur { get; set; } public bool Saved { get; set; } }
+class PersistData { public List<PersistTrack> Tracks { get; set; } = new(); public int Cur { get; set; } = -1; public float Vol { get; set; } = .6f; public bool Shuf { get; set; } public bool Rep { get; set; } }
+
 class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Bitmap Art; public bool Saved, HadTitle; }
 
 class Wired : Form
@@ -67,7 +70,7 @@ class Wired : Form
     readonly Complex[] cpx = new Complex[1024];
     string status = ""; int statusEnd;
     readonly Random R = new(); bool dlBusy, dlCancel; System.Diagnostics.Process dlProc;
-    double posS, durS; int last = Environment.TickCount;
+    double posS, durS; int last = Environment.TickCount, tickN; static bool ytUpdated;
 
     // ---------- layout (logical units; scaled by DPI) ----------
     float U => Math.Max(1f, DeviceDpi / 96f);
@@ -93,6 +96,10 @@ class Wired : Form
         var t = new System.Windows.Forms.Timer { Interval = 16 };
         t.Tick += (s, e) => Tick(); t.Start();
         FormClosed += (s, e) => Stop();
+        FormClosing += (s, e) => SaveState();
+        try { System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.AboveNormal; } catch { }
+        LoadState();
+        Shown += (s, e) => { ReloadMeta(); UpdateYtdlp(); };
         Relayout();
     }
 
@@ -150,7 +157,7 @@ class Wired : Form
                 BeginInvoke(new Action(() =>
                 {
                     Sibling(made); foreach (var t in made) { if (Unk(t.Artist)) t.Artist = "Unknown"; t.Art ??= RandomCover(); }
-                    pl.AddRange(made); St(made.Count == 0 ? "No audio files found" : "", made.Count == 0 ? 4000 : 0);
+                    pl.AddRange(made); SaveState(); St(made.Count == 0 ? "No audio files found" : "", made.Count == 0 ? 4000 : 0);
                     if (cur < 0 && pl.Count > 0) Play(0); else Invalidate();
                 }));
             }
@@ -230,7 +237,7 @@ class Wired : Form
     void Play(int i)
     {
         if (i < 0 || i >= pl.Count) return;
-        Stop(); cur = i; ++gen; lyrY = 0; posS = 0; EnsureVisible(); Relayout();
+        Stop(); cur = i; ++gen; Text = $"{pl[i].Artist} - {pl[i].Title}"; lyrY = 0; posS = 0; EnsureVisible(); Relayout();
         if (pl[i].Url != null) { Tune(i, gen); return; }
         try
         {
@@ -379,7 +386,7 @@ class Wired : Form
             }
             if (root.TryGetProperty("entries", out var en)) { var pc2 = S(root, "uploader") ?? S(root, "channel"); foreach (var e in en.EnumerateArray()) One(e, pc2); }
             else One(root, null);
-            St($"Added {n} tracks", 4000); if (cur < 0 && pl.Count > 0) Play(0); else Invalidate();
+            SaveState(); St($"Added {n} tracks", 4000); if (cur < 0 && pl.Count > 0) Play(0); else Invalidate();
         }
         catch (Exception ex) { St("Couldn't connect: " + ex.Message, 6000); }
     }
@@ -391,8 +398,14 @@ class Wired : Form
     static async Task<string> Resolve(string url)
     {
         lock (sc) if (sc.TryGetValue(url, out var c) && Environment.TickCount - c.t < 1200000) return c.u;
-        var u = (await Ytdlp($"-f \"bestaudio[ext=m4a]/bestaudio\" -g --no-playlist --no-warnings \"{url}\"")).Trim().Split('\n')[0].Trim();
-        if (!u.StartsWith("http")) throw new Exception("no stream found - delete %LocalAppData%\\TheWiredMusic\\yt-dlp.exe to update it");
+        string u = null;
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            try { u = (await Ytdlp($"-f \"bestaudio[ext=m4a]/bestaudio\" -g --no-playlist --no-warnings \"{url}\"")).Trim().Split('\n')[0].Trim(); } catch { u = null; }
+            if (u != null && u.StartsWith("http")) break;
+            if (attempt == 0 && !ytUpdated) { ytUpdated = true; try { await Ytdlp("-U"); } catch { } } else break;
+        }
+        if (u == null || !u.StartsWith("http")) throw new Exception("couldn't get the song - check your internet");
         lock (sc) sc[url] = (u, Environment.TickCount); return u;
     }
     static readonly SemaphoreSlim cvLock = new(1, 1);
@@ -442,9 +455,12 @@ class Wired : Form
     void Tick()
     {
         if (WindowState == FormWindowState.Minimized || ClientSize.Width <= 0) return;
-        int now = Environment.TickCount; float dt = Math.Clamp((now - last) / 1000f, .001f, .05f); last = now;
+        int now = Environment.TickCount; tickN++;
         if (statusEnd != 0 && now - statusEnd >= 0) { status = ""; statusEnd = 0; Inv(rHdr); }
         if (wo != null && playing && wo.PlaybackState == PlaybackState.Stopped) { if (rep) Play(cur); else Next(); return; }
+        // save CPU: animate slower when the window is in the background or nothing is playing
+        if (ActiveForm != this) { if (tickN % 3 != 0) return; } else if (!playing && tickN % 2 != 0) return;
+        float dt = Math.Clamp((now - last) / 1000f, .001f, .05f); last = now;
         Array.Clear(spec);
         if (playing && tap != null)
         {
@@ -773,7 +789,7 @@ class Wired : Form
     protected override void OnMouseDown(MouseEventArgs e)
     {
         var p = V(e.Location); int id = Hit(p);
-        if (e.Button == MouseButtons.Right) { if (id >= 100000) SetArtist(id % 100000); return; }
+        if (e.Button == MouseButtons.Right) { if (id >= 100000) RowMenu(id % 100000); return; }
         if (e.Button != MouseButtons.Left) return;
         if (p.Y < HdrH && id == 0) { ReleaseCapture(); SendMessage(Handle, 0xA1, 2, 0); return; }
         switch (id)
@@ -817,7 +833,12 @@ class Wired : Form
     {
         if (e.Control && e.KeyCode == Keys.F) { OpenSearch(); e.SuppressKeyPress = true; }
         else if (e.Control && e.KeyCode == Keys.V && Clipboard.ContainsText() && Clipboard.GetText().Contains("youtu")) AddYt(Clipboard.GetText().Trim());
-        else if (e.KeyCode == Keys.Space) { Toggle(); e.Handled = true; } else if (e.KeyCode == Keys.Right) Next(); else if (e.KeyCode == Keys.Left) Prev();
+        else if (e.KeyCode == Keys.Space) { Toggle(); e.Handled = true; } else if (e.KeyCode == Keys.Right) { if (e.Control) Next(); else SeekBy(5); }
+        else if (e.KeyCode == Keys.Left) { if (e.Control) Prev(); else SeekBy(-5); }
+        else if (e.KeyCode == Keys.N) Next(); else if (e.KeyCode == Keys.P) Prev();
+        else if (e.KeyCode == Keys.Up) { vol = Math.Min(1, vol + .05f); mute = false; Vol(); }
+        else if (e.KeyCode == Keys.Down) { vol = Math.Max(0, vol - .05f); Vol(); }
+        else if (e.KeyCode == Keys.M) { mute = !mute; Vol(); } else if (e.KeyCode == Keys.S) shuf = !shuf; else if (e.KeyCode == Keys.R) rep = !rep;
         Invalidate();
     }
 
@@ -864,15 +885,113 @@ class Wired : Form
         }
         Track Pick() => lb.SelectedIndex >= 0 && lb.SelectedIndex < results.Count ? results[lb.SelectedIndex] : null;
         var bPlay = Flat("Play", 16, 422, ICE); var bQ = Flat("+ Queue", 132, 422, TX); var bDl = Flat("Download MP3", 248, 422, TX); bDl.Width = 130; var bX = Flat("Close", 514, 422, TX);
-        bPlay.Click += (s, e) => { var t = Pick(); if (t == null) return; after = () => { t.Art = RandomCover(); pl.Add(t); Play(pl.Count - 1); }; f.Close(); };
+        bPlay.Click += (s, e) => { var t = Pick(); if (t == null) return; after = () => { t.Art = RandomCover(); pl.Add(t); SaveState(); Play(pl.Count - 1); }; f.Close(); };
         lb.DoubleClick += (s, e) => bPlay.PerformClick();
-        bQ.Click += (s, e) => { var t = Pick(); if (t == null) return; t.Art = RandomCover(); pl.Add(t); lbl.Text = "Added to playlist"; if (cur < 0) Play(0); else Invalidate(); };
+        bQ.Click += (s, e) => { var t = Pick(); if (t == null) return; t.Art = RandomCover(); pl.Add(t); SaveState(); lbl.Text = "Added to playlist"; if (cur < 0) Play(0); else Invalidate(); };
         bDl.Click += (s, e) => { var t = Pick(); if (t == null) return; after = () => Download(new List<Track> { t }); f.Close(); };
         bX.Click += (s, e) => f.Close();
         go.Click += async (s, e) => await Search();
         tb.KeyDown += async (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await Search(); } else if (e.KeyCode == Keys.Escape) f.Close(); };
         f.Controls.AddRange(new Control[] { tb, go, lb, lbl, bPlay, bQ, bDl, bX }); f.Shown += (s, e) => tb.Focus();
         f.ShowDialog(this); after?.Invoke();
+    }
+
+    // ---------- remember playlist + settings between launches ----------
+    static string StateFile => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic", "state.json");
+    void SaveState()
+    {
+        try
+        {
+            var d = new PersistData { Cur = cur, Vol = vol, Shuf = shuf, Rep = rep };
+            foreach (var t in pl) d.Tracks.Add(new PersistTrack { Url = t.Url, Path = t.Path, Title = t.Title, Artist = t.Artist, Album = t.Album, Year = t.Year, Dur = t.Dur, Saved = t.Saved });
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(StateFile)); System.IO.File.WriteAllText(StateFile, System.Text.Json.JsonSerializer.Serialize(d));
+        }
+        catch { }
+    }
+    void LoadState()
+    {
+        try
+        {
+            if (!System.IO.File.Exists(StateFile)) return;
+            var d = System.Text.Json.JsonSerializer.Deserialize<PersistData>(System.IO.File.ReadAllText(StateFile)); if (d == null) return;
+            vol = Math.Clamp(d.Vol, 0f, 1f); shuf = d.Shuf; rep = d.Rep; Track curT = null;
+            for (int i = 0; i < d.Tracks.Count; i++)
+            {
+                var s = d.Tracks[i]; if (s.Path != null && !System.IO.File.Exists(s.Path)) continue;
+                var t = new Track { Url = s.Url, Path = s.Path, Title = s.Title ?? "", Artist = s.Artist ?? "Unknown", Album = s.Album ?? "", Year = s.Year ?? "", Dur = s.Dur, Saved = s.Saved, Art = RandomCover() };
+                pl.Add(t); if (i == d.Cur) curT = t;
+            }
+            cur = curT != null ? pl.IndexOf(curT) : -1;
+            if (cur >= 0) Text = $"{pl[cur].Artist} - {pl[cur].Title}";
+        }
+        catch { }
+    }
+    // covers + lyrics of local songs are re-read in the background after launch
+    void ReloadMeta()
+    {
+        var locals = pl.Where(t => t.Path != null).ToList();
+        Task.Run(() =>
+        {
+            foreach (var t in locals)
+            {
+                try
+                {
+                    using var tf = TagLib.File.Create(t.Path); string ly = tf.Tag.Lyrics; Bitmap bm = null;
+                    if (tf.Tag.Pictures.Length > 0) { using var ms = new MemoryStream(tf.Tag.Pictures[0].Data.Data); using var im = Image.FromStream(ms); bm = Square(im, 320); }
+                    BeginInvoke(new Action(() => { t.Lyr = ly; if (bm != null) { t.Art = bm; if (artFor == t) artFor = null; } Invalidate(); }));
+                }
+                catch { }
+            }
+            try { BeginInvoke(new Action(() => Relayout())); } catch { }
+        });
+    }
+    // keep yt-dlp fresh (YouTube changes often and old versions stop working)
+    void UpdateYtdlp()
+    {
+        Task.Run(async () =>
+        {
+            try
+            {
+                var exe = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic", "yt-dlp.exe");
+                if (System.IO.File.Exists(exe) && (DateTime.Now - System.IO.File.GetLastWriteTime(exe)).TotalDays > 5) { ytUpdated = true; await Ytdlp("-U"); }
+            }
+            catch { }
+        });
+    }
+
+    // ---------- media keys (work even when the browser is focused) ----------
+    [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr h, int id, uint mod, uint vk);
+    [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr h, int id);
+    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); RegisterHotKey(Handle, 1, 0, 0xB3); RegisterHotKey(Handle, 2, 0, 0xB0); RegisterHotKey(Handle, 3, 0, 0xB1); }
+    protected override void OnHandleDestroyed(EventArgs e) { UnregisterHotKey(Handle, 1); UnregisterHotKey(Handle, 2); UnregisterHotKey(Handle, 3); base.OnHandleDestroyed(e); }
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == 0x0312) { switch ((int)m.WParam) { case 1: Toggle(); break; case 2: Next(); break; case 3: Prev(); break; } Invalidate(); return; }
+        base.WndProc(ref m);
+    }
+    void SeekBy(double sec)
+    {
+        if (rd == null) return;
+        try { var t = rd.CurrentTime + TimeSpan.FromSeconds(sec); if (t < TimeSpan.Zero) t = TimeSpan.Zero; if (t < rd.TotalTime) rd.CurrentTime = t; } catch { }
+    }
+
+    // ---------- right-click menu on a playlist row ----------
+    ContextMenuStrip NewMenu() => new ContextMenuStrip { BackColor = Color.FromArgb(10, 16, 22), ForeColor = TX, Font = new Font("Segoe UI", 9.5f), ShowImageMargin = false, Renderer = new ToolStripProfessionalRenderer(new DarkColors()) { RoundedEdges = false } };
+    void RowMenu(int k)
+    {
+        if (k < 0 || k >= pl.Count) return; var t = pl[k]; var m = NewMenu();
+        void Item(string txt, Action a) { var it = new ToolStripMenuItem(txt) { ForeColor = TX }; it.Click += (s, e) => { a(); Invalidate(); }; m.Items.Add(it); }
+        Item("Play", () => Play(k)); Item("Set artist...", () => SetArtist(k));
+        if (t.Path != null) Item("Show in folder", () => { try { System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + t.Path + "\""); } catch { } });
+        Item("Remove from playlist", () => RemoveAt(k));
+        m.Show(Cursor.Position);
+    }
+    void RemoveAt(int k)
+    {
+        if (k < 0 || k >= pl.Count) return; bool was = k == cur; if (was) Stop();
+        pl.RemoveAt(k);
+        if (was) { if (pl.Count > 0) Play(Math.Min(k, pl.Count - 1)); else { cur = -1; ++gen; Text = "THE WIRED MUSIC"; } } else if (k < cur) cur--;
+        scroll = Math.Clamp(scroll, 0, Math.Max(0, pl.Count - Rows)); SaveState(); Relayout();
     }
 
     void ShowMenu()
@@ -884,7 +1003,7 @@ class Wired : Form
         m.Items.Add(new ToolStripSeparator());
         Item("Shuffle", () => shuf = !shuf, shuf); Item("Repeat", () => rep = !rep, rep);
         m.Items.Add(new ToolStripSeparator());
-        Item("Clear playlist", () => { Stop(); pl.Clear(); cur = -1; scroll = 0; posS = durS = 0; St(""); Relayout(); });
+        Item("Clear playlist", () => { Stop(); pl.Clear(); cur = -1; scroll = 0; posS = durS = 0; Text = "THE WIRED MUSIC"; St(""); SaveState(); Relayout(); });
         Item("About", About); Item("Exit", Close);
         m.Show(this, C(rMenu.X, rMenu.Bottom + 2));
     }
