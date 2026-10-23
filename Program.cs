@@ -167,7 +167,7 @@ class Wired : Form
         try
         {
             rd = Rd(pl[i].Path); vsp = new VolumeSampleProvider(rd.ToSampleProvider()) { Volume = mute ? 0 : vol }; tap = new Tap(vsp);
-            wo = new WaveOutEvent { DesiredLatency = 120 }; wo.Init(tap.ToWaveProvider()); wo.Play(); playing = true; St("");
+            wo = new WaveOutEvent { DesiredLatency = 250, NumberOfBuffers = 3 }; wo.Init(tap.ToWaveProvider()); wo.Play(); playing = true; St("");
         }
         catch (Exception ex) { St("Couldn't play: " + ex.Message, 6000); playing = false; }
     }
@@ -202,6 +202,25 @@ class Wired : Form
         using var p = System.Diagnostics.Process.Start(psi); onStart?.Invoke(p);
         var errTask = p.StandardError.ReadToEndAsync(); // drain so the process never blocks on a full pipe
         var o = await p.StandardOutput.ReadToEndAsync(); await p.WaitForExitAsync(); await errTask; return o;
+    }
+    // one-time ffmpeg download (needed to convert to MP3)
+    static async Task<string> Ffmpeg(Action<string> say = null)
+    {
+        var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic"); Directory.CreateDirectory(dir);
+        var exe = System.IO.Path.Combine(dir, "ffmpeg.exe");
+        if (System.IO.File.Exists(exe)) return dir;
+        say?.Invoke("One-time setup: getting MP3 converter...");
+        var zip = System.IO.Path.Combine(dir, "ffmpeg.zip");
+        using (var h = new HttpClient { Timeout = TimeSpan.FromMinutes(15) })
+        using (var rs = await h.GetStreamAsync("https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"))
+        using (var fs = System.IO.File.Create(zip)) await rs.CopyToAsync(fs);
+        using (var za = System.IO.Compression.ZipFile.OpenRead(zip))
+        {
+            var en = za.Entries.First(x => x.FullName.EndsWith("/bin/ffmpeg.exe"));
+            en.ExtractToFile(exe, true);
+        }
+        try { System.IO.File.Delete(zip); } catch { }
+        return dir;
     }
     static Button Flat(string t, int x, int y, Color c)
     {
@@ -243,7 +262,8 @@ class Wired : Form
             var t = list[i]; St($"Downloading {i + 1}/{list.Count}: {t.Title}");
             try
             {
-                var o = await Ytdlp($"-f \"bestaudio[ext=m4a]/bestaudio\" --no-playlist --no-warnings --no-simulate --print after_move:filepath -o \"{tpl}\" \"{t.Url}\"", p => dlProc = p);
+                var ff = await Ffmpeg(msg => St(msg));
+                var o = await Ytdlp($"-f bestaudio -x --audio-format mp3 --audio-quality 0 --ffmpeg-location \"{ff}\" --no-playlist --no-warnings --no-simulate --print after_move:filepath -o \"{tpl}\" \"{t.Url}\"", p => dlProc = p);
                 var path = o.Trim().Split('\n').Last().Trim();
                 if (System.IO.File.Exists(path)) { ok++; t.Saved = true; }
             }
@@ -275,20 +295,28 @@ class Wired : Form
     }
     void Tune(int i, int my)
     {
-        var t = pl[i]; St("Tuning in...");
+        var t = pl[i]; St("Preparing song...");
         Task.Run(async () =>
         {
             try
             {
-                var u = (await Ytdlp($"-f \"bestaudio[ext=m4a]/bestaudio\" -g --no-playlist --no-warnings \"{t.Url}\"")).Trim().Split('\n')[0].Trim();
-                if (!u.StartsWith("http")) throw new Exception("no stream found - delete %LocalAppData%\\TheWiredMusic\\yt-dlp.exe to update it");
+                var m = Regex.Match(t.Url, @"v=([\w-]+)"); var id = m.Success ? m.Groups[1].Value : Guid.NewGuid().ToString("N");
+                var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic", "cache"); Directory.CreateDirectory(dir);
+                var file = System.IO.Path.Combine(dir, id + ".mp3");
+                if (!System.IO.File.Exists(file))
+                {
+                    var ff = await Ffmpeg(msg => BeginInvoke(new Action(() => { if (my == gen) St(msg); }))); 
+                    BeginInvoke(new Action(() => { if (my == gen) St("Converting to MP3..."); }));
+                    await Ytdlp($"-f bestaudio -x --audio-format mp3 --audio-quality 0 --ffmpeg-location \"{ff}\" --no-playlist --no-warnings -o \"{System.IO.Path.Combine(dir, id)}.%(ext)s\" \"{t.Url}\"");
+                }
+                if (!System.IO.File.Exists(file)) throw new Exception("conversion failed - delete %LocalAppData%\\TheWiredMusic to reset");
                 BeginInvoke(new Action(() =>
                 {
                     if (my != gen) return;
                     try
                     {
-                        rd = Rd(u); vsp = new VolumeSampleProvider(rd.ToSampleProvider()) { Volume = mute ? 0 : vol }; tap = new Tap(vsp);
-                        wo = new WaveOutEvent { DesiredLatency = 150 }; wo.Init(tap.ToWaveProvider()); wo.Play(); playing = true; St("");
+                        rd = Rd(file); vsp = new VolumeSampleProvider(rd.ToSampleProvider()) { Volume = mute ? 0 : vol }; tap = new Tap(vsp);
+                        wo = new WaveOutEvent { DesiredLatency = 250, NumberOfBuffers = 3 }; wo.Init(tap.ToWaveProvider()); wo.Play(); playing = true; St("");
                     }
                     catch (Exception ex) { St("Couldn't play: " + ex.Message, 6000); }
                 }));
@@ -328,15 +356,17 @@ class Wired : Form
     float[] wave; float bassAvg, flash, beatCd, avg; int shI;
     readonly float[] shR = new float[6], shA = new float[6];
     readonly float[] bx = new float[48], by = new float[48], bv = new float[48], bsz = new float[48], bph = new float[48];
-    readonly PointF[] ringP = new PointF[96], waveP = new PointF[128];
+    readonly PointF[] surfP = new PointF[96];
+    readonly float[] liq = new float[48], lvel = new float[48];
     void Vis(float dt)
     {
         if (!playing) wave = null;
         float bass = 0; for (int k = 0; k < 5; k++) bass += bars[k]; bass /= 5;
         if (beatCd > 0) beatCd -= dt;
-        if (playing && beatCd <= 0 && bass > bassAvg * 1.3f + .06f) { beatCd = .22f; flash = 1; shR[shI] = 0; shA[shI] = 1; shI = (shI + 1) % shR.Length; }
+        if (playing && beatCd <= 0 && bass > bassAvg * 1.3f + .06f) { beatCd = .22f; flash = 1; shR[shI] = 0; shA[shI] = 1; shI = (shI + 1) % shR.Length; for (int k = 0; k < 12; k++) lvel[k] += 3f * (1 - k / 12f); }
         bassAvg += (bass - bassAvg) * Math.Min(1, dt * 1.8f); flash *= (float)Math.Pow(.86, dt * 30);
         for (int k = 0; k < shR.Length; k++) if (shA[k] > 0) { shR[k] += dt * 150; shA[k] -= dt * 1.1f; }
+        for (int k = 0; k < 48; k++) { float acc = (bars[k] - liq[k]) * 110f - lvel[k] * 9f; lvel[k] += acc * dt; liq[k] = Math.Clamp(liq[k] + lvel[k] * dt, -.15f, 1.4f); }
         float s = 0; for (int k = 0; k < 48; k++) s += bars[k]; avg = s / 48;
         for (int i = 0; i < bx.Length; i++) { by[i] -= bv[i] * dt * (.03f + avg * .3f + flash * .1f); if (by[i] < -.05f) { by[i] = 1.05f; bx[i] = (float)R.NextDouble(); } }
     }
@@ -534,37 +564,36 @@ class Wired : Form
         }
     }
 
+    float LiqAt(float idx)
+    {
+        idx = Math.Clamp(idx, 0, 46.999f); int i = (int)idx; float f = idx - i; return liq[i] * (1 - f) + liq[i + 1] * f;
+    }
     void DrawVis(Graphics g)
     {
-        var r = rVis; float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f, m = Math.Min(r.Width, r.Height), R0 = m * .2f, amp = m * .2f, t = Environment.TickCount / 1000f;
-        var st = g.Save(); g.SetClip(new Rectangle(r.X + 1, r.Y + 1, r.Width - 2, r.Height - 2));
-        for (int i = 0; i < 3; i++) { float rr = R0 * (2.2f - i * .45f) + amp * avg; g.FillEllipse(Br(Al(ICE, (int)(4 + i * 2 + flash * 9))), cx - rr, cy - rr, 2 * rr, 2 * rr); }
-        for (int i = 1; i <= 3; i++) { float rr = R0 + amp * .4f * i + avg * amp * .2f; g.DrawEllipse(Pe(Al(ICE, 16), 1f), cx - rr, cy - rr, 2 * rr, 2 * rr); }
-        float maxR = m * .5f - 6;
-        for (int k = 0; k < shR.Length; k++) if (shA[k] > 0)
+        var r = rVis; float t = Environment.TickCount / 1000f;
+        var st = g.Save(); using (var cp = RR(new RectangleF(r.X + 1, r.Y + 1, r.Width - 2, r.Height - 2), 34)) g.SetClip(cp);
+        float y0 = r.Y + r.Height * .56f, amp = r.Height * .36f, calm = 3f + avg * 9f;
+        int N = Math.Min(95, Math.Max(24, r.Width / 12)); float tilt = (float)Math.Sin(t * .4f) * r.Height * .025f;
+        float[] offs = { 0, 12, 26 }, fac = { 1f, .72f, .5f }; int[] alp = { 40, 32, 26 };
+        for (int L = 2; L >= 0; L--)
         {
-            float rr = R0 + shR[k]; if (rr >= maxR) continue; float fade = 1 - shR[k] / Math.Max(1, maxR - R0);
-            g.DrawEllipse(Pe(Al(ICE, (int)(shA[k] * 150 * fade)), 1.4f), cx - rr, cy - rr, 2 * rr, 2 * rr);
+            for (int i = 0; i < N; i++)
+            {
+                float u = i / (float)(N - 1), d = Math.Abs(u - .5f) * 2f;
+                float y = y0 + offs[L] * (r.Height / 350f) - LiqAt(d * 47f) * amp * fac[L] + tilt * (u - .5f) * 2f
+                    + (float)Math.Sin(u * 8.2f + t * (.9f + L * .3f) + L * 2f) * calm + (float)Math.Sin(u * 17f - t * (1.4f + L * .2f) + L) * calm * .45f;
+                surfP[i] = new PointF(r.X + u * r.Width, y);
+            }
+            using (var path = new GraphicsPath())
+            {
+                path.AddCurve(surfP, 0, N - 1, .4f); path.AddLine(surfP[N - 1].X, surfP[N - 1].Y, r.Right, r.Bottom + 2); path.AddLine(r.Right, r.Bottom + 2, r.X, r.Bottom + 2); path.CloseFigure();
+                g.FillPath(Br(Al(L == 0 ? ICE : ICE2, alp[L] + (int)(flash * 14))), path);
+            }
+            if (L == 0) { g.DrawCurve(Pe(Al(ICE, 34), 7f), surfP, 0, N - 1, .4f); g.DrawCurve(Pe(Al(ICE2, 235), 1.8f), surfP, 0, N - 1, .4f); }
+            else g.DrawCurve(Pe(Al(ICE, 70 - L * 18), 1.1f), surfP, 0, N - 1, .4f);
         }
         int ba = 36 + (int)(avg * 90);
-        for (int i = 0; i < bx.Length; i++) { float x = r.X + bx[i] * r.Width + (float)Math.Sin(t * .7f + bph[i]) * 6, y = r.Y + by[i] * r.Height; g.DrawEllipse(Pe(Al(ICE, ba), 1f), x, y, bsz[i], bsz[i]); }
-        float breathe = playing ? 0 : (float)Math.Sin(t * 1.2f) * 2f, rot = t * .08f;
-        for (int k = 0; k < 96; k++)
-        {
-            int ix = k < 48 ? k : 95 - k; double an = k / 96.0 * Math.PI * 2 + rot - Math.PI / 2; float rr = R0 + 2 + bars[ix] * amp + flash * 4 + breathe;
-            ringP[k] = new PointF(cx + (float)Math.Cos(an) * rr, cy + (float)Math.Sin(an) * rr);
-        }
-        g.FillClosedCurve(Br(Al(ICE, 22)), ringP, FillMode.Winding, .35f);
-        g.DrawClosedCurve(Pe(Al(ICE, 34), 7f), ringP, .35f, FillMode.Winding);
-        g.DrawClosedCurve(Pe(Al(ICE2, 235), 1.8f), ringP, .35f, FillMode.Winding);
-        for (int k = 0; k < 128; k++)
-        {
-            double an = k / 128.0 * Math.PI * 2; float w = wave != null ? Math.Clamp(wave[k * 8] * amp * .6f, -amp * .4f, amp * .4f) : (float)Math.Sin(t * .5 + k * .35) * 1.2f; float rr = R0 * .62f + w;
-            waveP[k] = new PointF(cx + (float)Math.Cos(an) * rr, cy + (float)Math.Sin(an) * rr);
-        }
-        g.DrawClosedCurve(Pe(Al(WH, 150), 1.2f), waveP, .3f, FillMode.Winding);
-        g.DrawEllipse(Pe(Al(ICE2, (int)(flash * 200)), 1.5f), cx - 6 - flash * 12, cy - 6 - flash * 12, 12 + flash * 24, 12 + flash * 24);
-        g.FillEllipse(Br(ICE2), cx - 3, cy - 3, 6, 6);
+        for (int i = 0; i < bx.Length; i++) { float x = r.X + bx[i] * r.Width + (float)Math.Sin(t * .7f + bph[i]) * 6, y = r.Y + by[i] * r.Height; if (y > y0 + 6) g.DrawEllipse(Pe(Al(ICE2, ba), 1f), x, y, bsz[i], bsz[i]); }
         g.Restore(st);
     }
 
