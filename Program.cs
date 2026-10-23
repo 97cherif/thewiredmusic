@@ -204,23 +204,35 @@ class Wired : Form
         var o = await p.StandardOutput.ReadToEndAsync(); await p.WaitForExitAsync(); await errTask; return o;
     }
     // one-time ffmpeg download (needed to convert to MP3)
+    static readonly SemaphoreSlim ffLock = new(1, 1);
     static async Task<string> Ffmpeg(Action<string> say = null)
     {
         var dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic"); Directory.CreateDirectory(dir);
         var exe = System.IO.Path.Combine(dir, "ffmpeg.exe");
         if (System.IO.File.Exists(exe)) return dir;
-        say?.Invoke("One-time setup: getting MP3 converter...");
-        var zip = System.IO.Path.Combine(dir, "ffmpeg.zip");
-        using (var h = new HttpClient { Timeout = TimeSpan.FromMinutes(15) })
-        using (var rs = await h.GetStreamAsync("https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"))
-        using (var fs = System.IO.File.Create(zip)) await rs.CopyToAsync(fs);
-        using (var za = System.IO.Compression.ZipFile.OpenRead(zip))
+        await ffLock.WaitAsync(); // only one download at a time, others wait and reuse it
+        try
         {
-            var en = za.Entries.First(x => x.FullName.EndsWith("/bin/ffmpeg.exe"));
-            System.IO.Compression.ZipFileExtensions.ExtractToFile(en, exe, true);
+            if (System.IO.File.Exists(exe)) return dir;
+            say?.Invoke("One-time setup: getting MP3 converter...");
+            var zip = System.IO.Path.Combine(dir, "ffmpeg-" + Guid.NewGuid().ToString("N") + ".zip"); var tmp = exe + ".tmp";
+            try
+            {
+                using (var h = new HttpClient { Timeout = TimeSpan.FromMinutes(20) })
+                using (var rs = await h.GetStreamAsync("https://github.com/yt-dlp/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"))
+                using (var fs = System.IO.File.Create(zip)) await rs.CopyToAsync(fs);
+                using (var za = System.IO.Compression.ZipFile.OpenRead(zip))
+                {
+                    var en = za.Entries.First(x => x.FullName.EndsWith("/bin/ffmpeg.exe"));
+                    System.IO.Compression.ZipFileExtensions.ExtractToFile(en, tmp, true);
+                }
+                System.IO.File.Move(tmp, exe, true);
+            }
+            finally { try { System.IO.File.Delete(zip); } catch { } try { System.IO.File.Delete(tmp); } catch { } }
+            try { foreach (var old in Directory.GetFiles(dir, "ffmpeg*.zip")) System.IO.File.Delete(old); } catch { }
+            return dir;
         }
-        try { System.IO.File.Delete(zip); } catch { }
-        return dir;
+        finally { ffLock.Release(); }
     }
     static Button Flat(string t, int x, int y, Color c)
     {
