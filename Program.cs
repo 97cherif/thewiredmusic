@@ -72,7 +72,7 @@ class Wired : Form
     // ---------- layout (logical units; scaled by DPI) ----------
     float U => Math.Max(1f, DeviceDpi / 96f);
     int W = 1000, H = 620; const int RowH = 40, HdrH = 44;
-    Rectangle rHdr, rMenu, rMin, rMax, rClose, rNow, rVis, rLyr, rPl, rList, rArt, rSeek, rVol, rTime, rBF, rBY, rDT, rDA;
+    Rectangle rHdr, rMenu, rSearch, rMin, rMax, rClose, rNow, rVis, rLyr, rPl, rList, rArt, rSeek, rVol, rTime, rBF, rBY, rDT, rDA;
     readonly Rectangle[] rb = new Rectangle[6]; // 0 prev 1 play 2 next 3 repeat 4 shuffle 5 mute
     int colX, colR, hid; Point mp = new(-1, -1);
     Bitmap bg; bool bgDirty = true; Rectangle clip;
@@ -388,7 +388,7 @@ class Wired : Form
     {
         float u = U; W = Math.Max(1, (int)(ClientSize.Width / u)); H = Math.Max(1, (int)(ClientSize.Height / u));
         rHdr = new Rectangle(0, 0, W, HdrH);
-        rMenu = new Rectangle(10, 6, 32, 32); rClose = new Rectangle(W - 44, 6, 32, 32); rMax = new Rectangle(W - 80, 6, 32, 32); rMin = new Rectangle(W - 116, 6, 32, 32);
+        rMenu = new Rectangle(10, 6, 32, 32); rSearch = new Rectangle(46, 6, 32, 32); rClose = new Rectangle(W - 44, 6, 32, 32); rMax = new Rectangle(W - 80, 6, 32, 32); rMin = new Rectangle(W - 116, 6, 32, 32);
         int pad = 20, top = 52, plw = Math.Clamp((int)(W * .3f), 290, 380);
         rPl = new Rectangle(W - pad - plw, top, plw, Math.Max(100, H - top - pad));
         int lw = rPl.X - 16 - pad;
@@ -429,7 +429,7 @@ class Wired : Form
     static void TxtIn(Graphics g, string s, Font f, Color c, RectangleF r, StringFormat sf) => g.DrawString(s ?? "", f, Br(c), r, sf);
     static string Fm(double s) => s <= 0 || double.IsNaN(s) ? "0:00" : $"{(int)s / 60}:{(int)s % 60:00}";
 
-    const int I_PREV = 0, I_PLAY = 1, I_PAUSE = 2, I_NEXT = 3, I_REP = 4, I_SHUF = 5, I_VOL = 6, I_MUTE = 7, I_MENU = 8, I_MIN = 9, I_MAX = 10, I_CLOSE = 11, I_DOWN = 12, I_CHECK = 13;
+    const int I_PREV = 0, I_PLAY = 1, I_PAUSE = 2, I_NEXT = 3, I_REP = 4, I_SHUF = 5, I_VOL = 6, I_MUTE = 7, I_MENU = 8, I_MIN = 9, I_MAX = 10, I_CLOSE = 11, I_DOWN = 12, I_CHECK = 13, I_SEARCH = 14;
     static void Ico(Graphics g, int k, float cx, float cy, float s, Color c, float w = 1.7f)
     {
         var p = Pe(c, w); var b = Br(c);
@@ -463,6 +463,7 @@ class Wired : Form
             case I_DOWN:
                 g.DrawLine(p, cx, cy - s * .8f, cx, cy + s * .45f); g.DrawLines(p, new[] { new PointF(cx - s * .55f, cy - s * .1f), new PointF(cx, cy + s * .5f), new PointF(cx + s * .55f, cy - s * .1f) });
                 g.DrawLine(p, cx - s * .75f, cy + s * .9f, cx + s * .75f, cy + s * .9f); break;
+            case I_SEARCH: g.DrawEllipse(p, cx - s * .85f, cy - s * .85f, s * 1.4f, s * 1.4f); g.DrawLine(p, cx + s * .3f, cy + s * .3f, cx + s * .9f, cy + s * .9f); break;
             case I_CHECK: g.DrawLines(p, new[] { new PointF(cx - s * .65f, cy), new PointF(cx - s * .15f, cy + s * .5f), new PointF(cx + s * .7f, cy - s * .5f) }); break;
         }
     }
@@ -527,7 +528,8 @@ class Wired : Form
     void DrawHeader(Graphics g)
     {
         Hov(g, rMenu, hid == 4, false); Ico(g, I_MENU, rMenu.X + 16, rMenu.Y + 16, 8, hid == 4 ? WH : TX);
-        Txt(g, "THE WIRED MUSIC", fHdr, DM, 54, 15, 200);
+        Hov(g, rSearch, hid == 5, false); Ico(g, I_SEARCH, rSearch.X + 15, rSearch.Y + 15, 7.5f, hid == 5 ? WH : TX);
+        Txt(g, "THE WIRED MUSIC", fHdr, DM, 92, 15, 200);
         if (status.Length > 0) TxtIn(g, status, fS, DM, new RectangleF(250, 8, Math.Max(10, W - 250 - 130), 28), sfCC);
         Hov(g, rMin, hid == 1, false); Ico(g, I_MIN, rMin.X + 16, rMin.Y + 16, 6, hid == 1 ? WH : TX);
         Hov(g, rMax, hid == 2, false); Ico(g, I_MAX, rMax.X + 16, rMax.Y + 16, 6, hid == 2 ? WH : TX);
@@ -652,7 +654,7 @@ class Wired : Form
     void Max() { MaximizedBounds = Screen.FromControl(this).WorkingArea; WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized; }
     int Hit(Point p)
     {
-        if (rClose.Contains(p)) return 3; if (rMax.Contains(p)) return 2; if (rMin.Contains(p)) return 1; if (rMenu.Contains(p)) return 4;
+        if (rClose.Contains(p)) return 3; if (rMax.Contains(p)) return 2; if (rMin.Contains(p)) return 1; if (rMenu.Contains(p)) return 4; if (rSearch.Contains(p)) return 5;
         if (p.Y < HdrH) return 0;
         if (Rectangle.Inflate(rSeek, 0, 10).Contains(p)) return 17;
         if (rVol.Width > 0 && Rectangle.Inflate(rVol, 8, 10).Contains(p)) return 16;
@@ -677,6 +679,7 @@ class Wired : Form
             case 2: Max(); return;
             case 3: Close(); return;
             case 4: ShowMenu(); return;
+            case 5: OpenSearch(); return;
             case 17: dragSeek = true; SeekTo(p.X); Inv(rNow); return;
             case 16: dragVol = true; SetVol(p.X); Inv(rNow); return;
             case 10: Prev(); break; case 11: Toggle(); break; case 12: Next(); break;
@@ -709,9 +712,64 @@ class Wired : Form
     }
     protected override void OnKeyDown(KeyEventArgs e)
     {
-        if (e.Control && e.KeyCode == Keys.V && Clipboard.ContainsText() && Clipboard.GetText().Contains("youtu")) AddYt(Clipboard.GetText().Trim());
+        if (e.Control && e.KeyCode == Keys.F) { OpenSearch(); e.SuppressKeyPress = true; }
+        else if (e.Control && e.KeyCode == Keys.V && Clipboard.ContainsText() && Clipboard.GetText().Contains("youtu")) AddYt(Clipboard.GetText().Trim());
         else if (e.KeyCode == Keys.Space) { Toggle(); e.Handled = true; } else if (e.KeyCode == Keys.Right) Next(); else if (e.KeyCode == Keys.Left) Prev();
         Invalidate();
+    }
+
+    // ---------- online search (YouTube via yt-dlp) ----------
+    void OpenSearch()
+    {
+        using var f = new Form { FormBorderStyle = FormBorderStyle.None, Size = new Size(640, 470), StartPosition = FormStartPosition.CenterParent, BackColor = Color.FromArgb(10, 16, 22), ShowInTaskbar = false };
+        using var fT = new Font("Segoe UI", 10f); using var fS2 = new Font("Segoe UI", 8.5f); using var fIn = new Font("Segoe UI", 10.5f);
+        var results = new List<Track>(); Action after = null;
+        f.Paint += (s, e) => { e.Graphics.DrawRectangle(Pe(Al(ICE, 60), 1), 0, 0, f.Width - 1, f.Height - 1); e.Graphics.DrawString("Search music online", fT, Br(DM), 16, 12); };
+        var tb = new TextBox { Left = 16, Top = 40, Width = 500, BorderStyle = BorderStyle.FixedSingle, BackColor = BG, ForeColor = ICE2, Font = fIn };
+        var go = Flat("Search", 526, 38, ICE); go.Width = 98;
+        var lb = new ListBox { Left = 16, Top = 82, Width = 608, Height = 300, BackColor = BG, ForeColor = TX, BorderStyle = BorderStyle.None, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 42, IntegralHeight = false };
+        var lbl = new Label { Left = 16, Top = 392, Width = 608, Height = 20, ForeColor = DM, Font = fS2, Text = "" };
+        lb.DrawItem += (s, e) =>
+        {
+            if (e.Index < 0 || e.Index >= results.Count) return; var t = results[e.Index]; bool sel = (e.State & DrawItemState.Selected) != 0; var gg = e.Graphics;
+            gg.FillRectangle(Br(sel ? Color.FromArgb(28, 52, 64) : BG), e.Bounds);
+            gg.DrawString(t.Title, fT, Br(sel ? WH : TX), new RectangleF(e.Bounds.X + 10, e.Bounds.Y + 4, e.Bounds.Width - 80, 20), sfL);
+            gg.DrawString(t.Artist, fS2, Br(DM), new RectangleF(e.Bounds.X + 10, e.Bounds.Y + 23, e.Bounds.Width - 80, 16), sfL);
+            if (t.Dur > 0) gg.DrawString(Fm(t.Dur), fS2, Br(DM), new RectangleF(e.Bounds.Right - 70, e.Bounds.Y + 14, 60, 16), sfR);
+        };
+        async Task Search()
+        {
+            var q = tb.Text.Trim().Replace("\"", ""); if (q.Length == 0) return;
+            lbl.Text = "Searching..."; go.Enabled = false;
+            try
+            {
+                var j = await Ytdlp($"-J --flat-playlist --no-warnings \"ytsearch12:{q}\"");
+                using var d = System.Text.Json.JsonDocument.Parse(j); results.Clear(); lb.Items.Clear();
+                string S(System.Text.Json.JsonElement e, string k) => e.TryGetProperty(k, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : null;
+                if (d.RootElement.TryGetProperty("entries", out var en))
+                    foreach (var e in en.EnumerateArray())
+                    {
+                        var id = S(e, "id"); if (id == null) continue;
+                        results.Add(new Track { Url = "https://www.youtube.com/watch?v=" + id, Title = S(e, "title") ?? "Untitled", Artist = S(e, "channel") ?? S(e, "uploader") ?? "YouTube", Album = "YouTube",
+                            Dur = e.TryGetProperty("duration", out var du) && du.ValueKind == System.Text.Json.JsonValueKind.Number ? du.GetDouble() : 0 });
+                        lb.Items.Add(id);
+                    }
+                lbl.Text = results.Count == 0 ? "No results" : ""; if (lb.Items.Count > 0) lb.SelectedIndex = 0;
+            }
+            catch (Exception ex) { lbl.Text = "Search failed: " + ex.Message; }
+            finally { go.Enabled = true; }
+        }
+        Track Pick() => lb.SelectedIndex >= 0 && lb.SelectedIndex < results.Count ? results[lb.SelectedIndex] : null;
+        var bPlay = Flat("Play", 16, 422, ICE); var bQ = Flat("+ Queue", 132, 422, TX); var bDl = Flat("Download MP3", 248, 422, TX); bDl.Width = 130; var bX = Flat("Close", 514, 422, TX);
+        bPlay.Click += (s, e) => { var t = Pick(); if (t == null) return; after = () => { t.Art = RandomCover(); pl.Add(t); Play(pl.Count - 1); }; f.Close(); };
+        lb.DoubleClick += (s, e) => bPlay.PerformClick();
+        bQ.Click += (s, e) => { var t = Pick(); if (t == null) return; t.Art = RandomCover(); pl.Add(t); lbl.Text = "Added to playlist"; if (cur < 0) Play(0); else Invalidate(); };
+        bDl.Click += (s, e) => { var t = Pick(); if (t == null) return; after = () => Download(new List<Track> { t }); f.Close(); };
+        bX.Click += (s, e) => f.Close();
+        go.Click += async (s, e) => await Search();
+        tb.KeyDown += async (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await Search(); } else if (e.KeyCode == Keys.Escape) f.Close(); };
+        f.Controls.AddRange(new Control[] { tb, go, lb, lbl, bPlay, bQ, bDl, bX }); f.Shown += (s, e) => tb.Focus();
+        f.ShowDialog(this); after?.Invoke();
     }
 
     void ShowMenu()
@@ -719,7 +777,7 @@ class Wired : Form
         var m = new ContextMenuStrip { BackColor = Color.FromArgb(10, 16, 22), ForeColor = TX, Font = new Font("Segoe UI", 9.5f), ShowImageMargin = false, Renderer = new ToolStripProfessionalRenderer(new DarkColors()) { RoundedEdges = false } };
         void Item(string t, Action a, bool chk = false) { var it = new ToolStripMenuItem(t) { Checked = chk, ForeColor = TX }; it.Click += (s, e) => { a(); Invalidate(); }; m.Items.Add(it); }
         void OpenDir() { using var d = new FolderBrowserDialog(); if (d.ShowDialog() == DialogResult.OK) Add(new[] { d.SelectedPath }); }
-        Item("Open files...", PickFiles); Item("Open folder...", OpenDir); Item("Add YouTube link...", OpenYt); Item("Download all YouTube tracks...", () => Download(pl.ToList()));
+        Item("Open files...", PickFiles); Item("Open folder...", OpenDir); Item("Search online...", OpenSearch); Item("Add YouTube link...", OpenYt); Item("Download all YouTube tracks...", () => Download(pl.ToList()));
         m.Items.Add(new ToolStripSeparator());
         Item("Shuffle", () => shuf = !shuf, shuf); Item("Repeat", () => rep = !rep, rep);
         m.Items.Add(new ToolStripSeparator());
