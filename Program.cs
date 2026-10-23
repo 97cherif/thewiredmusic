@@ -620,7 +620,7 @@ class Wired : Form
         if (rList.Contains(p)) { int k = scroll + (p.Y - rList.Y) / RowH; if (k < pl.Count) return (pl[k].Url != null && p.X > rList.Right - 12 - 40 - 28 && p.X < rList.Right - 12 - 40) ? 200000 + k : 100000 + k; }
         return 0;
     }
-    void SeekTo(int x) { seekFrac = Math.Clamp((x - rSeek.X) / (double)rSeek.Width, 0, .999); }
+    void SeekTo(int x) { seekFrac = (float)Math.Clamp((x - rSeek.X) / (double)rSeek.Width, 0, .999); }
     void ApplySeek() { if (rd == null) return; try { rd.CurrentTime = TimeSpan.FromSeconds(rd.TotalTime.TotalSeconds * seekFrac); } catch { } }
     void SetVol(int x) { vol = Math.Clamp((x - rVol.X) / (float)Math.Max(1, rVol.Width), 0, 1); mute = false; Vol(); }
     void PickFiles() { using var d = new OpenFileDialog { Multiselect = true, Filter = "Audio|*.mp3;*.flac;*.wav;*.ogg;*.m4a;*.aac;*.wma" }; if (d.ShowDialog() == DialogResult.OK) Add(d.FileNames); }
