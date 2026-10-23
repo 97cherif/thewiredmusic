@@ -28,6 +28,58 @@ class Tap : ISampleProvider
     public void Snap(float[] d) { lock (l) { for (int i = 0; i < d.Length; i++) d[i] = buf[(pos + i) % buf.Length]; } }
 }
 
+// Decodes ahead on its own thread so network/UI hiccups never reach the sound card (fixes audio stutter)
+class Buffered : ISampleProvider, IDisposable
+{
+    readonly ISampleProvider src; readonly WaveStream rs; readonly float[] ring; readonly int rate, ch; int rp, wp, count; long consumed; double baseS;
+    readonly object l = new(), rdl = new(); volatile bool stop, eof; readonly Thread th;
+    public Buffered(WaveStream rs)
+    {
+        this.rs = rs; src = rs.ToSampleProvider(); rate = src.WaveFormat.SampleRate; ch = src.WaveFormat.Channels; ring = new float[rate * ch * 8];
+        th = new Thread(Fill) { IsBackground = true, Priority = ThreadPriority.AboveNormal }; th.Start();
+    }
+    public WaveFormat WaveFormat => src.WaveFormat;
+    public double PositionSeconds { get { lock (l) return baseS + consumed / (double)(rate * ch); } }
+    void Fill()
+    {
+        var tmp = new float[Math.Max(4096, rate * ch / 4)];
+        while (!stop)
+        {
+            bool room; lock (l) room = ring.Length - count >= tmp.Length;
+            if (!room || eof) { Thread.Sleep(15); continue; }
+            lock (rdl)
+            {
+                if (stop) break;
+                int n; try { n = src.Read(tmp, 0, tmp.Length); } catch { n = 0; }
+                if (n <= 0) { eof = true; continue; }
+                lock (l) { for (int i = 0; i < n; i++) { ring[wp] = tmp[i]; if (++wp == ring.Length) wp = 0; } count += n; }
+            }
+        }
+    }
+    public int Read(float[] b, int o, int c)
+    {
+        int n;
+        lock (l)
+        {
+            n = Math.Min(c, count);
+            for (int i = 0; i < n; i++) { b[o + i] = ring[rp]; if (++rp == ring.Length) rp = 0; }
+            count -= n; consumed += n;
+        }
+        if (n < c)
+        {
+            if (eof && n == 0) return 0;
+            if (eof) return n;
+            Array.Clear(b, o + n, c - n); return c; // buffer ran dry: play silence instead of stalling
+        }
+        return n;
+    }
+    public void Seek(double sec)
+    {
+        Task.Run(() => { lock (rdl) { try { rs.CurrentTime = TimeSpan.FromSeconds(sec); } catch { } lock (l) { rp = wp = count = 0; consumed = 0; baseS = sec; } eof = false; } });
+    }
+    public void Dispose() { stop = true; try { th.Join(800); } catch { } }
+}
+
 class PersistTrack { public string Url { get; set; } public string Path { get; set; } public string Title { get; set; } public string Artist { get; set; } public string Album { get; set; } public string Year { get; set; } public double Dur { get; set; } public bool Saved { get; set; } }
 class PersistData { public List<PersistTrack> Tracks { get; set; } = new(); public int Cur { get; set; } = -1; public float Vol { get; set; } = .6f; public bool Shuf { get; set; } public bool Rep { get; set; } }
 
@@ -64,7 +116,7 @@ class Wired : Form
 
     // ---------- state ----------
     readonly List<Track> pl = new(); int cur = -1, scroll, lyrY;
-    WaveOutEvent wo; WaveStream rd; VolumeSampleProvider vsp; Tap tap; int gen;
+    WaveOutEvent wo; WaveStream rd; Buffered buf; VolumeSampleProvider vsp; Tap tap; int gen;
     bool playing, shuf, rep, mute, dragSeek, dragVol; float vol = .6f, seekFrac;
     readonly float[] bars = new float[48], spec = new float[48], snap = new float[1024], win = new float[1024];
     readonly Complex[] cpx = new Complex[1024];
@@ -97,6 +149,7 @@ class Wired : Form
         t.Tick += (s, e) => Tick(); t.Start();
         FormClosed += (s, e) => Stop();
         FormClosing += (s, e) => SaveState();
+        try { System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency; } catch { }
         try { System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.AboveNormal; } catch { }
         LoadState();
         Shown += (s, e) => { ReloadMeta(); UpdateYtdlp(); };
@@ -241,7 +294,7 @@ class Wired : Form
         if (pl[i].Url != null) { Tune(i, gen); return; }
         try
         {
-            rd = Rd(pl[i].Path); vsp = new VolumeSampleProvider(rd.ToSampleProvider()) { Volume = mute ? 0 : vol }; tap = new Tap(vsp);
+            rd = Rd(pl[i].Path); vsp = new VolumeSampleProvider(buf = new Buffered(rd)) { Volume = mute ? 0 : vol }; tap = new Tap(vsp);
             wo = new WaveOutEvent { DesiredLatency = 250, NumberOfBuffers = 3 }; wo.Init(tap.ToWaveProvider()); wo.Play(); playing = true; St("");
         }
         catch (Exception ex) { St("Couldn't play: " + ex.Message, 6000); playing = false; }
@@ -249,8 +302,8 @@ class Wired : Form
     // dispose off the UI thread so switching tracks never stalls
     void Stop()
     {
-        var w = wo; var r = rd; wo = null; rd = null; vsp = null; tap = null; playing = false;
-        if (w != null || r != null) Task.Run(() => { try { w?.Dispose(); } catch { } try { r?.Dispose(); } catch { } });
+        var w = wo; var r = rd; var bf = buf; wo = null; rd = null; buf = null; vsp = null; tap = null; playing = false;
+        if (w != null || r != null) Task.Run(() => { try { bf?.Dispose(); } catch { } try { w?.Dispose(); } catch { } try { r?.Dispose(); } catch { } });
     }
     void Toggle()
     {
@@ -258,7 +311,7 @@ class Wired : Form
         if (playing) wo.Pause(); else wo.Play(); playing = !playing;
     }
     void Next() { if (pl.Count == 0) return; Play(shuf ? R.Next(pl.Count) : (cur + 1) % pl.Count); }
-    void Prev() { if (pl.Count == 0) return; if (rd != null && rd.CurrentTime.TotalSeconds > 3) rd.CurrentTime = TimeSpan.Zero; else Play((cur - 1 + pl.Count) % pl.Count); }
+    void Prev() { if (pl.Count == 0) return; if (buf != null && posS > 3) buf.Seek(0); else Play((cur - 1 + pl.Count) % pl.Count); }
     void Vol() { if (vsp != null) vsp.Volume = mute ? 0 : vol; }
     static WaveStream Rd(string s) => s.StartsWith("http") ? (WaveStream)new MediaFoundationReader(s) : new AudioFileReader(s);
 
@@ -430,7 +483,7 @@ class Wired : Form
     {
         try
         {
-            rd = Rd(src); vsp = new VolumeSampleProvider(rd.ToSampleProvider()) { Volume = mute ? 0 : vol }; tap = new Tap(vsp);
+            rd = Rd(src); vsp = new VolumeSampleProvider(buf = new Buffered(rd)) { Volume = mute ? 0 : vol }; tap = new Tap(vsp);
             wo = new WaveOutEvent { DesiredLatency = 250, NumberOfBuffers = 3 }; wo.Init(tap.ToWaveProvider()); wo.Play(); playing = true; St(""); Prefetch();
         }
         catch (Exception ex) { St("Couldn't play: " + ex.Message, 6000); }
@@ -476,7 +529,7 @@ class Wired : Form
         }
         float dec = (float)Math.Pow(.88, dt * 30);
         for (int k = 0; k < 48; k++) bars[k] = spec[k] > bars[k] ? bars[k] + (spec[k] - bars[k]) * .75f : bars[k] * dec;
-        try { posS = rd?.CurrentTime.TotalSeconds ?? 0; durS = rd?.TotalTime.TotalSeconds ?? 0; } catch { }
+        try { posS = buf?.PositionSeconds ?? 0; durS = rd?.TotalTime.TotalSeconds ?? 0; } catch { }
         if (durS <= 0 && cur >= 0 && cur < pl.Count) durS = pl[cur].Dur;
         Vis(dt); Inv(rVis); if (playing || dragSeek) Inv(rTime);
     }
@@ -781,7 +834,7 @@ class Wired : Form
         return 0;
     }
     void SeekTo(int x) { seekFrac = (float)Math.Clamp((x - rSeek.X) / (double)rSeek.Width, 0, .999); }
-    void ApplySeek() { if (rd == null) return; try { rd.CurrentTime = TimeSpan.FromSeconds(rd.TotalTime.TotalSeconds * seekFrac); } catch { } }
+    void ApplySeek() { if (rd == null || buf == null) return; try { buf.Seek(rd.TotalTime.TotalSeconds * seekFrac); } catch { } }
     void SetVol(int x) { vol = Math.Clamp((x - rVol.X) / (float)Math.Max(1, rVol.Width), 0, 1); mute = false; Vol(); }
     void PickFiles() { using var d = new OpenFileDialog { Multiselect = true, Filter = "Audio|*.mp3;*.flac;*.wav;*.ogg;*.m4a;*.aac;*.wma" }; if (d.ShowDialog() == DialogResult.OK) Add(d.FileNames); }
 
@@ -972,7 +1025,7 @@ class Wired : Form
     void SeekBy(double sec)
     {
         if (rd == null) return;
-        try { var t = rd.CurrentTime + TimeSpan.FromSeconds(sec); if (t < TimeSpan.Zero) t = TimeSpan.Zero; if (t < rd.TotalTime) rd.CurrentTime = t; } catch { }
+        try { var t = posS + sec; if (t < 0) t = 0; if (buf != null && t < rd.TotalTime.TotalSeconds - 1) { buf.Seek(t); posS = t; } } catch { }
     }
 
     // ---------- right-click menu on a playlist row ----------
