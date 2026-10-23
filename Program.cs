@@ -127,9 +127,9 @@ class Wired : Form
     // ---------- layout (logical units; scaled by DPI) ----------
     float U => Math.Max(1f, DeviceDpi / 96f);
     int W = 1000, H = 620; const int RowH = 40, HdrH = 44;
-    Rectangle rHdr, rMenu, rSearch, rMin, rMax, rClose, rNow, rVis, rLyr, rPl, rList, rArt, rSeek, rVol, rTime, rBF, rBY, rDT, rDA;
+    Rectangle rHdr, rMenu, rSearch, rClr, rMin, rMax, rClose, rNow, rVis, rLyr, rPl, rList, rArt, rSeek, rVol, rTime, rBF, rBY, rDT, rDA;
     readonly Rectangle[] rb = new Rectangle[6]; // 0 prev 1 play 2 next 3 repeat 4 shuffle 5 mute
-    int colX, colR, hid; Point mp = new(-1, -1);
+    int clrArm, colX, colR, hid; Point mp = new(-1, -1);
     Bitmap bg; bool bgDirty = true; Rectangle clip;
     Bitmap artBmp; Track artFor; int artPs;
     int Rows => Math.Max(1, rList.Height / RowH);
@@ -557,6 +557,7 @@ class Wired : Form
         if (WindowState == FormWindowState.Minimized || ClientSize.Width <= 0) return;
         int now = Environment.TickCount; tickN++;
         if (statusEnd != 0 && now - statusEnd >= 0) { status = ""; statusEnd = 0; Inv(rHdr); }
+        if (clrArm != 0 && now - clrArm >= 3000) { clrArm = 0; Inv(rClr); }
         if (wo != null && playing && wo.PlaybackState == PlaybackState.Stopped) { if (rep) Play(cur); else Next(); return; }
         // save CPU: animate slower when the window is in the background or nothing is playing
         if (ActiveForm != this) { if (tickN % 3 != 0) return; } else if (!playing && tickN % 2 != 0) return;
@@ -626,6 +627,7 @@ class Wired : Form
         rb[5] = new Rectangle(vw > 0 ? rVol.X - 38 : colR - 34, cy - 17, 34, 34);
         int by0 = rPl.Bottom - 16 - 32, bw = (rPl.Width - 32 - 18) / 4, bx0 = rPl.X + 16;
         rBF = new Rectangle(bx0, by0, bw, 32); rBY = new Rectangle(bx0 + bw + 6, by0, bw, 32); rDT = new Rectangle(bx0 + 2 * (bw + 6), by0, bw, 32); rDA = new Rectangle(bx0 + 3 * (bw + 6), by0, bw, 32);
+        rClr = new Rectangle(rPl.Right - 16 - 64, rPl.Y + 10, 64, 24);
         rList = new Rectangle(rPl.X + 6, rPl.Y + 44, rPl.Width - 12, Math.Max(RowH, by0 - 10 - (rPl.Y + 44)));
         scroll = Math.Clamp(scroll, 0, Math.Max(0, pl.Count - Rows));
         bgDirty = true; Invalidate();
@@ -838,7 +840,11 @@ class Wired : Form
 
     void DrawPl(Graphics g)
     {
-        if (pl.Count > 0) Txt(g, pl.Count + (pl.Count == 1 ? " track" : " tracks"), fXs, DM, rPl.X + 18, rPl.Y + 16, rPl.Width - 36);
+        if (pl.Count > 0)
+        {
+            Txt(g, pl.Count + (pl.Count == 1 ? " track" : " tracks"), fXs, DM, rPl.X + 18, rPl.Y + 16, rPl.Width - 100);
+            bool arm = clrArm != 0 && Environment.TickCount - clrArm < 3000; Pill(g, rClr, arm ? "Sure?" : "Clear", hid == 24, arm);
+        }
         else TxtIn(g, "Drop music here", fRow, DM, new RectangleF(rPl.X, rList.Y, rPl.Width, rList.Height), sfCC);
         var st = g.Save(); g.SetClip(rList);
         int rows = Rows, hr = hid >= 100000 ? hid % 100000 : -1, dlX = rList.Right - 12 - 40 - 26;
@@ -877,6 +883,7 @@ class Wired : Form
         if (rVol.Width > 0 && Rectangle.Inflate(rVol, 8, 10).Contains(p)) return 16;
         for (int i = 0; i < 6; i++) if (rb[i].Contains(p)) return 10 + i;
         if (rBF.Contains(p)) return 20; if (rBY.Contains(p)) return 21; if (rDT.Contains(p)) return 22; if (rDA.Contains(p)) return 23;
+        if (pl.Count > 0 && rClr.Contains(p)) return 24;
         if (rList.Contains(p)) { int k = scroll + (p.Y - rList.Y) / RowH; if (k < pl.Count) return (pl[k].Url != null && p.X > rList.Right - 12 - 40 - 28 && p.X < rList.Right - 12 - 40) ? 200000 + k : 100000 + k; }
         return 0;
     }
@@ -899,6 +906,7 @@ class Wired : Form
             case 3: Close(); return;
             case 4: ShowMenu(); return;
             case 5: OpenSearch(); return;
+            case 24: if (clrArm != 0 && Environment.TickCount - clrArm < 3000) { clrArm = 0; ClearAll(); } else clrArm = Environment.TickCount; Invalidate(); return;
             case 17: dragSeek = true; SeekTo(p.X); Inv(rNow); return;
             case 16: dragVol = true; SetVol(p.X); Inv(rNow); return;
             case 10: Prev(); break; case 11: Toggle(); break; case 12: Next(); break;
@@ -1087,6 +1095,7 @@ class Wired : Form
         Item("Remove from playlist", () => RemoveAt(k));
         m.Show(Cursor.Position);
     }
+    void ClearAll() { Stop(); ++gen; pl.Clear(); cur = -1; scroll = 0; posS = durS = 0; Text = "THE WIRED MUSIC"; St(""); SaveState(); Relayout(); }
     void RemoveAt(int k)
     {
         if (k < 0 || k >= pl.Count) return; bool was = k == cur; if (was) Stop();
@@ -1104,7 +1113,7 @@ class Wired : Form
         m.Items.Add(new ToolStripSeparator());
         Item("Shuffle", () => shuf = !shuf, shuf); Item("Repeat", () => rep = !rep, rep);
         m.Items.Add(new ToolStripSeparator());
-        Item("Clear playlist", () => { Stop(); pl.Clear(); cur = -1; scroll = 0; posS = durS = 0; Text = "THE WIRED MUSIC"; St(""); SaveState(); Relayout(); });
+        Item("Clear playlist", ClearAll);
         Item("About", About); Item("Exit", Close);
         m.Show(this, C(rMenu.X, rMenu.Bottom + 2));
     }
