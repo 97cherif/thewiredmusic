@@ -607,7 +607,46 @@ class Wired : Form
     }
 
     // finds the YouTube video that matches a Spotify song (closest length wins), then remembers it
-    static readonly Dictionary<string, string> spMap = new();
+    static string SpMapFile => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic", "spmap.json");
+    static readonly Dictionary<string, string> spMap = LoadSpMap();
+    static Dictionary<string, string> LoadSpMap() { try { return JsonSerializer.Deserialize<Dictionary<string, string>>(System.IO.File.ReadAllText(SpMapFile)) ?? new(); } catch { return new(); } }
+    static void SaveSpMap() { try { Dictionary<string, string> c; lock (spMap) c = new(spMap); Directory.CreateDirectory(System.IO.Path.GetDirectoryName(SpMapFile)); System.IO.File.WriteAllText(SpMapFile, JsonSerializer.Serialize(c)); } catch { } }
+    // fast YouTube search straight over HTTP (about 0.3 s) - no yt-dlp process needed just to find the video
+    static readonly HttpClient ytH = MakeYtHttp();
+    static HttpClient MakeYtHttp()
+    {
+        var h = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+        h.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36");
+        h.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9"); return h;
+    }
+    static async Task<List<(string id, double dur, string title, string ch)>> YtQuickSearch(string q)
+    {
+        var body = JsonSerializer.Serialize(new { context = new { client = new { clientName = "WEB", clientVersion = "2.20240620.05.00", hl = "en", gl = "US" } }, query = q, @params = "EgIQAQ==" });
+        using var r = await ytH.PostAsync("https://www.youtube.com/youtubei/v1/search?prettyPrint=false", new StringContent(body, System.Text.Encoding.UTF8, "application/json"));
+        r.EnsureSuccessStatusCode();
+        using var d = JsonDocument.Parse(await r.Content.ReadAsStringAsync()); var res = new List<(string, double, string, string)>();
+        void Walk(JsonElement e)
+        {
+            if (res.Count >= 8) return;
+            if (e.ValueKind == JsonValueKind.Object)
+            {
+                if (e.TryGetProperty("videoRenderer", out var vr) && vr.ValueKind == JsonValueKind.Object)
+                {
+                    var id = JStr(vr, "videoId"); double du = 0;
+                    if (vr.TryGetProperty("lengthText", out var lt) && lt.ValueKind == JsonValueKind.Object)
+                    {
+                        var tx = JStr(lt, "simpleText");
+                        if (tx != null) foreach (var part in tx.Split(':')) { if (!int.TryParse(part, out var n)) { du = 0; break; } du = du * 60 + n; }
+                    }
+                    string Runs(string k) { if (vr.TryGetProperty(k, out var o) && o.ValueKind == JsonValueKind.Object && o.TryGetProperty("runs", out var rs) && rs.ValueKind == JsonValueKind.Array && rs.GetArrayLength() > 0) return JStr(rs[0], "text"); return null; }
+                    if (id != null) res.Add((id, du, Runs("title"), Runs("ownerText") ?? Runs("longBylineText"))); return;
+                }
+                foreach (var pr in e.EnumerateObject()) Walk(pr.Value);
+            }
+            else if (e.ValueKind == JsonValueKind.Array) foreach (var x in e.EnumerateArray()) Walk(x);
+        }
+        Walk(d.RootElement); return res;
+    }
     // while a lookup is running, anyone else asking for the same thing (play + background warm-up) shares it instead of starting another yt-dlp
     static readonly Dictionary<string, Task<string>> spJobs = new(), rsJobs = new();
     static Task<string> Once(Dictionary<string, Task<string>> d, string key, Func<Task<string>> f)
@@ -626,10 +665,33 @@ class Wired : Form
         lock (spMap) if (spMap.TryGetValue(u, out var c)) { t.Url = c; return Task.FromResult(c); }
         return Once(spJobs, u, () => RealUrlCore(t));
     }
+    // scores each search result: length close to the Spotify length, official "Topic" audio, and not a live / cover / remix version unless the song itself is one
+    static string PickYt(List<(string id, double dur, string title, string ch)> r, Track t)
+    {
+        string want = ((t.Title ?? "") + " " + (t.Artist ?? "")).ToLowerInvariant(), art = LyFirstArtist(t.Artist ?? "").ToLowerInvariant();
+        string[] bad = { "live", "cover", "remix", "karaoke", "instrumental", "slowed", "sped up", "reverb", "nightcore", "8d", "acoustic", "reaction", "tutorial", "mashup", "loop", "hour" };
+        string best = null; double bs = double.MinValue;
+        for (int i = 0; i < r.Count; i++)
+        {
+            var x = r[i]; double sc = -i * 0.6;
+            if (t.Dur > 0 && x.dur > 0) { var df = Math.Abs(x.dur - t.Dur); sc += df <= 2 ? 10 : df <= 5 ? 6 : df <= 10 ? 0 : -Math.Min(30, df); }
+            var tl = (x.title ?? "").ToLowerInvariant(); var ch = (x.ch ?? "").ToLowerInvariant();
+            if (ch.EndsWith("- topic")) sc += 6; else if (ch.Contains("vevo") || tl.Contains("official audio")) sc += 2;
+            if (art.Length > 1 && (ch.Contains(art) || tl.Contains(art))) sc += 3;
+            foreach (var b in bad) { var rx = @"\b" + Regex.Escape(b) + @"\b"; if (Regex.IsMatch(tl, rx) && !Regex.IsMatch(want, rx)) sc -= 12; }
+            if (sc > bs) { bs = sc; best = x.id; }
+        }
+        return best;
+    }
     static async Task<string> RealUrlCore(Track t)
     {
         var u = t.Url;
         var q = u.Substring(u.IndexOf(':') + 1).Replace("\"", "").Replace("\\", ""); string best = null;
+        try
+        {
+            var ch = PickYt(await YtQuickSearch(q), t); if (ch != null) best = "https://www.youtube.com/watch?v=" + ch;
+        }
+        catch { }
         for (int attempt = 0; attempt < 2 && best == null; attempt++)
         {
             try
@@ -652,7 +714,7 @@ class Wired : Form
             if (best == null && attempt == 0 && !ytUpdated) { ytUpdated = true; try { await Ytdlp("-U"); } catch { } }
         }
         if (best == null) throw new Exception("couldn't find this song - check your internet");
-        lock (spMap) spMap[u] = best; t.Url = best; return best;
+        lock (spMap) spMap[u] = best; SaveSpMap(); t.Url = best; return best;
     }
     // writes title / artist / album / cover into the downloaded MP3
     static void TagSpotify(string path, Track t)
@@ -744,8 +806,12 @@ class Wired : Form
     }
     void Prefetch()
     {
-        if (shuf || pl.Count < 2 || cur < 0) return; var n = pl[(cur + 1) % pl.Count]; if (n.Url == null || CachedFile(n.Url) != null) return;
-        Task.Run(async () => { try { if (n.Spot) await RealUrl(n); await Resolve(n.Url); } catch { } });
+        if (shuf || pl.Count < 2 || cur < 0) return;
+        for (int k = 1; k <= 3 && k < pl.Count; k++)
+        {
+            var n = pl[(cur + k) % pl.Count]; if (n.Url == null || CachedFile(n.Url) != null) continue;
+            Task.Run(async () => { try { if (n.Spot) await RealUrl(n); await Resolve(n.Url); } catch { } });
+        }
     }
     void StartStream(string src)
     {
@@ -761,10 +827,10 @@ class Wired : Form
         var t = pl[i];
         if (t.Spot && t.Url.StartsWith("ytsearch")) // Spotify song: find the matching audio first, then play it
         {
-            St("Finding song...");
+            St("Loading...");
             Task.Run(async () =>
             {
-                try { await RealUrl(t); BeginInvoke(new Action(() => { if (my == gen && i < pl.Count && pl[i] == t) Tune(i, my); })); }
+                try { var yu = await RealUrl(t); try { await Resolve(yu); } catch { } BeginInvoke(new Action(() => { if (my == gen && i < pl.Count && pl[i] == t) Tune(i, my); })); }
                 catch (Exception ex) { BeginInvoke(new Action(() => { if (my == gen) St("Couldn't play: " + ex.Message, 6000); })); }
             });
             return;
@@ -811,7 +877,13 @@ class Wired : Form
         float dec = (float)Math.Pow(.88, dt * 30);
         for (int k = 0; k < 48; k++) bars[k] = spec[k] > bars[k] ? bars[k] + (spec[k] - bars[k]) * .75f : bars[k] * dec;
         try { posS = buf?.PositionSeconds ?? 0; durS = rd?.TotalTime.TotalSeconds ?? 0; } catch { }
-        if (durS <= 0 && cur >= 0 && cur < pl.Count) durS = pl[cur].Dur;
+        if (cur >= 0 && cur < pl.Count)
+        {
+            var ct0 = pl[cur];
+            if (ct0.Url != null && ct0.Dur > 0) durS = ct0.Dur;             // online song: the real length from Spotify / YouTube
+            else if (durS <= 0) durS = ct0.Dur;
+            if (ct0.Dur <= 0 && durS > 0 && playing) { ct0.Dur = durS; Inv(rPl); } // length unknown until now: remember it for the list
+        }
         Vis(dt); Inv(rVis); if (playing || dragSeek) Inv(rTime);
     }
 
@@ -1321,7 +1393,7 @@ class Wired : Form
         return 0;
     }
     void SeekTo(int x) { seekFrac = (float)Math.Clamp((x - rSeek.X) / (double)rSeek.Width, 0, .999); }
-    void ApplySeek() { if (rd == null || buf == null) return; try { buf.Seek(rd.TotalTime.TotalSeconds * seekFrac); } catch { } }
+    void ApplySeek() { if (rd == null || buf == null) return; try { double total = rd.TotalTime.TotalSeconds, d = durS > 0 ? durS : total; buf.Seek(Math.Max(0, Math.Min(total - 1, d * seekFrac))); } catch { } }
     void SetVol(int x) { vol = Math.Clamp((x - rVol.X) / (float)Math.Max(1, rVol.Width), 0, 1); mute = false; Vol(); }
     void PickFiles() { using var d = new OpenFileDialog { Multiselect = true, Filter = "Audio|*.mp3;*.flac;*.wav;*.ogg;*.m4a;*.aac;*.wma" }; if (d.ShowDialog() == DialogResult.OK) Add(d.FileNames); }
 
@@ -1711,6 +1783,7 @@ class Wired : Form
             {
                 var exe = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic", "yt-dlp.exe");
                 if (System.IO.File.Exists(exe) && (DateTime.Now - System.IO.File.GetLastWriteTime(exe)).TotalDays > 5) { ytUpdated = true; await Ytdlp("-U"); }
+                if (System.IO.File.Exists(exe)) await Ytdlp("--version");
             }
             catch { }
         });
