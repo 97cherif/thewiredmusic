@@ -132,7 +132,7 @@ class Wired : Form
     // ---------- layout (logical units; scaled by DPI) ----------
     float U => Math.Max(1f, DeviceDpi / 96f);
     int W = 1000, H = 620; const int RowH = 40, HdrH = 44;
-    Rectangle rHdr, rMenu, rSearch, rClr, rMin, rMax, rClose, rNow, rVis, rLyr, rLyBtn, rPl, rList, rArt, rSeek, rVol, rTime, rBF, rBY, rDT, rDA;
+    Rectangle rHdr, rMenu, rSearch, rClr, rMin, rMax, rClose, rNow, rVis, rLyr, rLyBtn, rPl, rList, rArt, rSeek, rVol, rTime, rBF, rBY, rBS, rDT, rDA;
     readonly Rectangle[] rb = new Rectangle[6]; // 0 prev 1 play 2 next 3 repeat 4 shuffle 5 mute
     int clrArm, colX, colR, hid; Point mp = new(-1, -1);
     Bitmap bg; bool bgDirty = true; Rectangle clip;
@@ -497,7 +497,7 @@ class Wired : Form
         if (dlCancel) { try { foreach (var f in Directory.GetFiles(d.SelectedPath)) if ((f.EndsWith(".part") || f.EndsWith(".ytdl")) && System.IO.File.GetLastWriteTime(f) >= t0.AddSeconds(-2)) System.IO.File.Delete(f); } catch { } }
         dlBusy = false; dlProc = null; St(dlCancel ? $"Stopped - {ok} song(s) kept" : $"Downloaded {ok}/{list.Count}", 6000); Invalidate();
     }
-    void OpenYt() { var u = Ask("Paste a YouTube video or playlist link", "", "youtu"); if (string.IsNullOrEmpty(u)) return; if (IsSpotify(u)) St("That is a Spotify link - use Add Spotify link", 5000); else AddYt(u); }
+    void OpenYt() { var u = Ask("Paste a YouTube video or playlist link", "", "youtu"); if (string.IsNullOrEmpty(u)) return; if (IsSpotify(u)) St("That is a Spotify link - use the Spotify button", 5000); else AddYt(u); }
     async void AddYt(string url)
     {
         St("Connecting...");
@@ -654,10 +654,10 @@ class Wired : Form
         }
         catch { }
     }
-    void OpenSpotify(bool dl = false)
+    void OpenSpotify()
     {
-        var u = Ask(dl ? "Paste a Spotify song, album or playlist link to download" : "Paste a Spotify song, album or playlist link", "", "spotify", dl ? "Download" : "Add");
-        if (!string.IsNullOrEmpty(u)) AddSpotify(u, dl);
+        var u = Ask("Paste a Spotify song, album or playlist link", "", "spotify", "Add");
+        if (!string.IsNullOrEmpty(u)) AddSpotify(u);
     }
     async void AddSpotify(string url, bool dl = false)
     {
@@ -673,67 +673,6 @@ class Wired : Form
             if (dl) Download(info.Tracks);
         }
         catch (Exception ex) { St("Couldn't add Spotify link: " + (ex.Message ?? "").Split('\n')[0], 7000); }
-    }
-
-    // ----- Spotify search (needs free developer keys: Client ID + Secret) -----
-    static string SpFile => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic", "spotify.txt");
-    static string spTok; static DateTime spExp;
-    static (string id, string sec) SpCreds()
-    {
-        try { var l = System.IO.File.ReadAllLines(SpFile); if (l.Length >= 2 && l[0].Trim().Length > 0 && l[1].Trim().Length > 0) return (l[0].Trim(), l[1].Trim()); } catch { }
-        return (null, null);
-    }
-    static bool AskSpotifyKeys()
-    {
-        using var f = new Form { FormBorderStyle = FormBorderStyle.None, Size = new Size(580, 238), StartPosition = FormStartPosition.CenterParent, BackColor = Color.FromArgb(10, 16, 22), ShowInTaskbar = false };
-        f.Paint += (s, e) =>
-        {
-            e.Graphics.DrawRectangle(Pe(Al(ICE, 60), 1), 0, 0, f.Width - 1, f.Height - 1); using var fn = new Font("Segoe UI", 9.5f);
-            e.Graphics.DrawString("Searching Spotify needs free developer keys.\nGo to developer.spotify.com/dashboard, create an app,\nthen copy its Client ID and Client Secret here.\n(Pasting a Spotify link works without any keys.)", fn, Br(DM), new RectangleF(16, 12, 548, 80));
-        };
-        var idTb = new TextBox { Left = 16, Top = 96, Width = 548, BorderStyle = BorderStyle.FixedSingle, BackColor = BG, ForeColor = ICE2, Font = new Font("Segoe UI", 10.5f), PlaceholderText = "Client ID" };
-        var scTb = new TextBox { Left = 16, Top = 134, Width = 548, BorderStyle = BorderStyle.FixedSingle, BackColor = BG, ForeColor = ICE2, Font = new Font("Segoe UI", 10.5f), PlaceholderText = "Client Secret", UseSystemPasswordChar = true };
-        var ok = Flat("Save", 340, 188, ICE); ok.DialogResult = DialogResult.OK; var no = Flat("Cancel", 456, 188, TX); no.DialogResult = DialogResult.Cancel;
-        f.Controls.Add(idTb); f.Controls.Add(scTb); f.Controls.Add(ok); f.Controls.Add(no); f.AcceptButton = ok; f.CancelButton = no; f.Shown += (s, e) => idTb.Focus();
-        if (f.ShowDialog() != DialogResult.OK) return false;
-        var a = idTb.Text.Trim(); var b = scTb.Text.Trim(); if (a.Length == 0 || b.Length == 0) return false;
-        try { Directory.CreateDirectory(System.IO.Path.GetDirectoryName(SpFile)); System.IO.File.WriteAllLines(SpFile, new[] { a, b }); } catch { return false; }
-        spTok = null; return true;
-    }
-    static async Task<string> SpToken()
-    {
-        if (spTok != null && DateTime.Now < spExp) return spTok;
-        var (id, sec) = SpCreds(); if (id == null) throw new Exception("no Spotify keys yet (menu > Spotify keys...)");
-        using var h = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-        var req = new HttpRequestMessage(HttpMethod.Post, "https://accounts.spotify.com/api/token") { Content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("grant_type", "client_credentials") }) };
-        req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(id + ":" + sec)));
-        var r = await h.SendAsync(req); var body = await r.Content.ReadAsStringAsync();
-        if (!r.IsSuccessStatusCode) throw new Exception("Spotify rejected the keys (menu > Spotify keys...)");
-        using var d = JsonDocument.Parse(body);
-        spTok = d.RootElement.GetProperty("access_token").GetString(); spExp = DateTime.Now.AddSeconds(Math.Max(60, d.RootElement.GetProperty("expires_in").GetInt32() - 60)); return spTok;
-    }
-    static async Task<List<Track>> SpSearch(string q)
-    {
-        var tok = await SpToken(); using var h = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-        h.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", tok);
-        var r = await h.GetAsync("https://api.spotify.com/v1/search?type=track&limit=10&q=" + Uri.EscapeDataString(q));
-        if ((int)r.StatusCode == 429) throw new Exception("Spotify says slow down - try again in a bit");
-        if (!r.IsSuccessStatusCode) throw new Exception($"Spotify search failed ({(int)r.StatusCode})");
-        using var d = JsonDocument.Parse(await r.Content.ReadAsStringAsync()); var res = new List<Track>();
-        if (d.RootElement.TryGetProperty("tracks", out var tr) && tr.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
-            foreach (var it in items.EnumerateArray())
-            {
-                if (it.ValueKind != JsonValueKind.Object) continue;
-                string artists = it.TryGetProperty("artists", out var ar) && ar.ValueKind == JsonValueKind.Array ? string.Join(", ", ar.EnumerateArray().Select(x => JStr(x, "name")).Where(x => !string.IsNullOrWhiteSpace(x))) : null;
-                string album = null, art = null; double bw = -1;
-                if (it.TryGetProperty("album", out var al) && al.ValueKind == JsonValueKind.Object)
-                {
-                    album = JStr(al, "name");
-                    if (al.TryGetProperty("images", out var ims) && ims.ValueKind == JsonValueKind.Array) foreach (var im in ims.EnumerateArray()) { var u = JStr(im, "url"); double w = JNum(im, "width"); if (u != null && w >= bw) { bw = w; art = u; } }
-                }
-                var title = JStr(it, "name"); if (!string.IsNullOrWhiteSpace(title)) res.Add(SpTrack(title, artists, album, JNum(it, "duration_ms") / 1000.0, art));
-            }
-        return res;
     }
 
     // ---------- instant YouTube playback: stream now, build the MP3 cache in the background ----------
@@ -865,12 +804,12 @@ class Wired : Form
         float u = U; W = Math.Max(1, (int)(ClientSize.Width / u)); H = Math.Max(1, (int)(ClientSize.Height / u));
         rHdr = new Rectangle(0, 0, W, HdrH);
         rMenu = new Rectangle(10, 6, 32, 32); rSearch = new Rectangle(46, 6, 32, 32); rClose = new Rectangle(W - 44, 6, 32, 32); rMax = new Rectangle(W - 80, 6, 32, 32); rMin = new Rectangle(W - 116, 6, 32, 32);
-        int pad = 20, top = 52, plw = Math.Clamp((int)(W * .3f), 290, 380);
+        int pad = 20, top = 52, plw = Math.Clamp((int)(W * .3f), 320, 380);
         rPl = new Rectangle(W - pad - plw, top, plw, Math.Max(100, H - top - pad));
         int lw = rPl.X - 16 - pad;
         rNow = new Rectangle(pad, top, lw, 182);
         int vy = rNow.Bottom + 16, vh = Math.Max(80, H - pad - vy);
-        rVis = new Rectangle(pad, vy, lw, vh); rLyr = Rectangle.Empty; rLyBtn = new Rectangle(rVis.Right - 16 - 132, rVis.Y + 14, 132, 28);
+        rVis = new Rectangle(pad, vy, lw, vh); rLyr = Rectangle.Empty; rLyBtn = new Rectangle(rVis.Right - 16 - 156, rVis.Y + 14, 156, 28);
         rArt = new Rectangle(rNow.X + 16, rNow.Y + 16, 150, 150);
         colX = rArt.Right + 22; colR = rNow.Right - 22;
         rSeek = new Rectangle(colX, rNow.Y + 100, Math.Max(10, colR - colX), 4);
@@ -881,8 +820,9 @@ class Wired : Form
         int avail = colR - (colX + 210), vw = avail >= 100 ? Math.Min(120, avail - 40) : 0;
         rVol = new Rectangle(colR - vw, cy - 2, vw, 4);
         rb[5] = new Rectangle(vw > 0 ? rVol.X - 38 : colR - 34, cy - 17, 34, 34);
-        int by0 = rPl.Bottom - 16 - 32, bw = (rPl.Width - 32 - 18) / 4, bx0 = rPl.X + 16;
-        rBF = new Rectangle(bx0, by0, bw, 32); rBY = new Rectangle(bx0 + bw + 6, by0, bw, 32); rDT = new Rectangle(bx0 + 2 * (bw + 6), by0, bw, 32); rDA = new Rectangle(bx0 + 3 * (bw + 6), by0, bw, 32);
+        int by0 = rPl.Bottom - 16 - 32, gap = 5, spw = 46, bw = (rPl.Width - 32 - spw - 4 * gap) / 4, bx0 = rPl.X + 16;
+        rBF = new Rectangle(bx0, by0, bw, 32); rBY = new Rectangle(bx0 + (bw + gap), by0, bw, 32); rBS = new Rectangle(bx0 + 2 * (bw + gap), by0, spw, 32);
+        rDT = new Rectangle(bx0 + 2 * (bw + gap) + spw + gap, by0, bw, 32); rDA = new Rectangle(bx0 + 3 * (bw + gap) + spw + gap, by0, bw, 32);
         rClr = new Rectangle(rPl.Right - 16 - 64, rPl.Y + 10, 64, 24);
         rList = new Rectangle(rPl.X + 6, rPl.Y + 44, rPl.Width - 12, Math.Max(RowH, by0 - 10 - (rPl.Y + 44)));
         scroll = Math.Clamp(scroll, 0, Math.Max(0, pl.Count - Rows));
@@ -1145,28 +1085,70 @@ class Wired : Form
         }
         return best;
     }
+    static string LyFirstArtist(string a)
+    {
+        a = Regex.Replace(a ?? "", @"\s*-\s*topic$|\s*vevo$|\s*official$", "", RegexOptions.IgnoreCase).Trim();
+        var parts = Regex.Split(a, @"\s*(?:,|;|&|\sfeat\.?\s|\sft\.?\s|\sx\s|\swith\s)\s*", RegexOptions.IgnoreCase);
+        return parts.Length > 0 ? parts[0].Trim() : a;
+    }
     static async Task<(string plain, string synced)> FetchLyrics(Track t)
     {
-        using var h = new HttpClient { Timeout = TimeSpan.FromSeconds(15) }; h.DefaultRequestHeaders.UserAgent.ParseAdd("TheWiredMusic/1.0");
+        using var h = new HttpClient { Timeout = TimeSpan.FromSeconds(12) };
+        h.DefaultRequestHeaders.UserAgent.ParseAdd("TheWiredMusic/1.1 (https://github.com/thewiredmusic)"); h.DefaultRequestHeaders.Add("Lrclib-Client", "TheWiredMusic v1.1");
         string artist = (t.Artist ?? "").Trim(), title = (t.Title ?? "").Trim();
         if (Unk(artist) || artist == "YouTube" || artist == "Spotify") artist = "";
         bool alb = !string.IsNullOrWhiteSpace(t.Album) && t.Album != "YouTube" && t.Album != "Spotify";
         string E(string v) => Uri.EscapeDataString(v);
-        async Task<JsonDocument> Get(string url) { try { var r = await h.GetAsync(url); if (!r.IsSuccessStatusCode) return null; return JsonDocument.Parse(await r.Content.ReadAsStringAsync()); } catch { return null; } }
-        if (artist.Length > 0 && title.Length > 0) // exact match first (artist + title + album + length)
+        int responses = 0; var sw = System.Diagnostics.Stopwatch.StartNew();
+        async Task<JsonDocument> Get(string url) // retries once on network errors / server errors
         {
-            using var d1 = await Get("https://lrclib.net/api/get?artist_name=" + E(artist) + "&track_name=" + E(title) + (alb ? "&album_name=" + E(t.Album) : "") + (t.Dur > 0 ? "&duration=" + (int)Math.Round(t.Dur) : ""));
-            if (d1 != null) { var p1 = JStr(d1.RootElement, "plainLyrics"); var s1 = JStr(d1.RootElement, "syncedLyrics"); if (!string.IsNullOrWhiteSpace(p1) || !string.IsNullOrWhiteSpace(s1)) return (p1, s1); }
+            for (int i = 0; i < 2 && sw.Elapsed.TotalSeconds < 35; i++)
+            {
+                try
+                {
+                    using var r = await h.GetAsync(url); responses++;
+                    if (r.IsSuccessStatusCode) return JsonDocument.Parse(await r.Content.ReadAsStringAsync());
+                    if ((int)r.StatusCode < 500 && (int)r.StatusCode != 429) return null;
+                }
+                catch { }
+                await Task.Delay(400);
+            }
+            return null;
         }
-        var ct = LyClean(title); var urls = new List<string>();
-        if (artist.Length > 0) urls.Add("https://lrclib.net/api/search?track_name=" + E(ct) + "&artist_name=" + E(artist));
-        urls.Add("https://lrclib.net/api/search?q=" + E((artist + " " + ct).Trim()));
-        foreach (var u in urls)
+        // every sensible way to read "artist + title": as given, cleaned, first artist only, "Artist - Title" split out of the title, title alone
+        var cands = new List<(string a, string ti)>();
+        void Cand(string a, string ti) { a = (a ?? "").Trim(); ti = (ti ?? "").Trim(); if (ti.Length == 0) return; if (!cands.Any(c => c.a.Equals(a, StringComparison.OrdinalIgnoreCase) && c.ti.Equals(ti, StringComparison.OrdinalIgnoreCase))) cands.Add((a, ti)); }
+        var ct = LyClean(title); var fa = LyFirstArtist(artist);
+        Cand(artist, title); Cand(artist, ct); Cand(fa, ct);
+        var dm = Regex.Match(ct, @"^(.{2,60}?)\s+[-–—]\s+(.+)$");
+        if (dm.Success) { Cand(dm.Groups[1].Value, dm.Groups[2].Value); Cand(LyFirstArtist(dm.Groups[1].Value), LyClean(dm.Groups[2].Value)); }
+        if (t.Dur > 0) Cand("", ct);
+        bool first = true;
+        foreach (var (a, ti) in cands)
         {
-            using var d = await Get(u); if (d == null) continue;
-            var b = BestLy(d.RootElement, t.Dur, u.Contains("track_name") ? 30 : 12);
-            if (!string.IsNullOrWhiteSpace(b.p) || !string.IsNullOrWhiteSpace(b.s)) return b;
+            if (!first && responses == 0) break; first = false; // can't reach the server at all - no point trying more
+            if (a.Length > 0)
+            {
+                using var d1 = await Get("https://lrclib.net/api/get?artist_name=" + E(a) + "&track_name=" + E(ti) + (alb ? "&album_name=" + E(t.Album) : "") + (t.Dur > 0 ? "&duration=" + (int)Math.Round(t.Dur) : ""));
+                if (d1 != null) { var p1 = JStr(d1.RootElement, "plainLyrics"); var s1 = JStr(d1.RootElement, "syncedLyrics"); if (!string.IsNullOrWhiteSpace(p1) || !string.IsNullOrWhiteSpace(s1)) return (p1, s1); }
+                using var d2 = await Get("https://lrclib.net/api/search?track_name=" + E(ti) + "&artist_name=" + E(a));
+                if (d2 != null) { var b2 = BestLy(d2.RootElement, t.Dur, 30); if (!string.IsNullOrWhiteSpace(b2.p) || !string.IsNullOrWhiteSpace(b2.s)) return b2; }
+                using var d3 = await Get("https://lrclib.net/api/search?q=" + E(a + " " + ti));
+                if (d3 != null) { var b3 = BestLy(d3.RootElement, t.Dur, 12); if (!string.IsNullOrWhiteSpace(b3.p) || !string.IsNullOrWhiteSpace(b3.s)) return b3; }
+            }
+            else if (t.Dur > 0)
+            {
+                using var d4 = await Get("https://lrclib.net/api/search?q=" + E(ti));
+                if (d4 != null) { var b4 = BestLy(d4.RootElement, t.Dur, 5); if (!string.IsNullOrWhiteSpace(b4.p) || !string.IsNullOrWhiteSpace(b4.s)) return b4; }
+            }
         }
+        // second source (plain text only) in case LRCLIB doesn't have the song
+        foreach (var (a, ti) in cands.Where(c => c.a.Length > 0).Take(3))
+        {
+            using var d5 = await Get("https://api.lyrics.ovh/v1/" + E(a) + "/" + E(ti));
+            var ly = d5 != null ? JStr(d5.RootElement, "lyrics") : null; if (!string.IsNullOrWhiteSpace(ly)) return (ly.Trim(), null);
+        }
+        if (responses == 0) throw new Exception("offline");
         return (null, null);
     }
     async void SearchLyrics(Track t)
@@ -1182,7 +1164,7 @@ class Wired : Form
                 try { System.IO.File.WriteAllText(LyCache(t), JsonSerializer.Serialize(new LyData { Plain = p, Synced = sy })); } catch { }
             }
         }
-        catch { t.LyrSt = 3; }
+        catch { t.LyrSt = 4; }
         Inv(rVis);
     }
     void LyrClick()
@@ -1194,7 +1176,7 @@ class Wired : Form
     void DrawLyBtn(Graphics g)
     {
         if (cur < 0 || cur >= pl.Count || rLyBtn.IsEmpty) return; var T = pl[cur]; int st = LS(T);
-        Pill(g, rLyBtn, st == 1 ? "Searching..." : st == 2 ? (T.LyrOff ? "Show lyrics" : "Hide lyrics") : st == 3 ? "Not found - retry" : "Search lyrics", hid == 30, st == 2 && !T.LyrOff);
+        Pill(g, rLyBtn, st == 1 ? "Searching..." : st == 2 ? (T.LyrOff ? "Show lyrics" : "Hide lyrics") : st == 3 ? "Not found - retry" : st == 4 ? "No connection - retry" : "Search lyrics", hid == 30, st == 2 && !T.LyrOff);
     }
     // drawn on top of the visualiser, inside its clip
     void DrawLyrics(Graphics g, Rectangle r)
@@ -1256,8 +1238,27 @@ class Wired : Form
             if (tk.Url != null) { bool h2 = hid == 200000 + k; if (tk.Saved) Ico(g, I_CHECK, dlX + 11, y + RowH / 2f, 5.5f, ICE); else Ico(g, I_DOWN, dlX + 11, y + RowH / 2f, 5.5f, h2 ? WH : DM); }
         }
         g.Restore(st);
-        Pill(g, rBF, "+ Files", hid == 20, false); Pill(g, rBY, "+ Link", hid == 21, true); Pill(g, rDT, "↓ Song", hid == 22, false);
+        Pill(g, rBF, "+ Files", hid == 20, false); Pill(g, rBY, "+ Link", hid == 21, true); DrawSpBtn(g); Pill(g, rDT, "↓ Song", hid == 22, false);
         Pill(g, rDA, dlBusy ? "■ Stop" : "↓ All", hid == 23, dlBusy);
+    }
+    // Spotify logo with a small link badge merged into its corner (adds a Spotify song / album / playlist by link)
+    void DrawSpBtn(Graphics g)
+    {
+        bool hot = hid == 25; var G = Color.FromArgb(30, 215, 96); var r = rBS;
+        FillRR(g, Br(Al(G, hot ? 64 : 30)), r, 16);
+        DrawRR(g, Pe(Al(G, hot ? 190 : 120), 1f), new RectangleF(r.X + .5f, r.Y + .5f, r.Width - 1, r.Height - 1), 16);
+        float x0 = r.X + r.Width / 2f - 5, y0 = r.Y + r.Height / 2f - 1.5f, R = 9.5f;
+        g.FillEllipse(Br(G), x0 - R, y0 - R, R * 2, R * 2);
+        var dk = Pe(Color.FromArgb(8, 22, 14), 1.9f);
+        float[] rr = { 6.6f, 5.0f, 3.4f }, dy = { 3.4f, 4.4f, 5.4f };
+        for (int i = 0; i < 3; i++) g.DrawArc(dk, x0 - rr[i], y0 + dy[i] - rr[i], rr[i] * 2, rr[i] * 2, 222, 96);
+        float bx = x0 + 9.5f, by = y0 + 7.5f, BR = 7.2f;           // link badge, bottom-right of the logo
+        g.FillEllipse(Br(Color.FromArgb(10, 16, 22)), bx - BR, by - BR, BR * 2, BR * 2);
+        g.DrawEllipse(Pe(G, 1.1f), bx - BR, by - BR, BR * 2, BR * 2);
+        var st = g.Save(); g.TranslateTransform(bx, by); g.RotateTransform(-45);
+        var lp = Pe(hot ? WH : ICE2, 1.4f);
+        DrawRR(g, lp, new RectangleF(-5.2f, -1.9f, 5.6f, 3.8f), 3.8f); DrawRR(g, lp, new RectangleF(-0.4f, -1.9f, 5.6f, 3.8f), 3.8f);
+        g.Restore(st);
     }
     void Pill(Graphics g, Rectangle r, string t, bool hot, bool acc)
     {
@@ -1277,7 +1278,7 @@ class Wired : Form
         if (Rectangle.Inflate(rSeek, 0, 10).Contains(p)) return 17;
         if (rVol.Width > 0 && Rectangle.Inflate(rVol, 8, 10).Contains(p)) return 16;
         for (int i = 0; i < 6; i++) if (rb[i].Contains(p)) return 10 + i;
-        if (rBF.Contains(p)) return 20; if (rBY.Contains(p)) return 21; if (rDT.Contains(p)) return 22; if (rDA.Contains(p)) return 23;
+        if (rBF.Contains(p)) return 20; if (rBY.Contains(p)) return 21; if (rBS.Contains(p)) return 25; if (rDT.Contains(p)) return 22; if (rDA.Contains(p)) return 23;
         if (pl.Count > 0 && rClr.Contains(p)) return 24;
         if (cur >= 0 && cur < pl.Count && rLyBtn.Contains(p)) return 30;
         if (rList.Contains(p)) { int k = scroll + (p.Y - rList.Y) / RowH; if (k < pl.Count) return (pl[k].Url != null && p.X > rList.Right - 12 - 40 - 28 && p.X < rList.Right - 12 - 40) ? 200000 + k : 100000 + k; }
@@ -1308,7 +1309,7 @@ class Wired : Form
             case 16: dragVol = true; SetVol(p.X); Inv(rNow); return;
             case 10: Prev(); break; case 11: Toggle(); break; case 12: Next(); break;
             case 13: rep = !rep; break; case 14: shuf = !shuf; break; case 15: mute = !mute; Vol(); break;
-            case 20: PickFiles(); return; case 21: OpenYt(); return;
+            case 20: PickFiles(); return; case 21: OpenYt(); return; case 25: OpenSpotify(); return;
             case 22: if (cur >= 0) Download(new List<Track> { pl[cur] }); return;
             case 23: if (dlBusy) StopDl(); else Download(pl.ToList()); return;
         }
@@ -1349,9 +1350,8 @@ class Wired : Form
     }
 
     // ---------- online search (YouTube via yt-dlp) ----------
-    void OpenSearch(bool spot = false)
+    void OpenSearch()
     {
-        if (spot && SpCreds().id == null && !AskSpotifyKeys()) return;
         // logical layout (scaled by DPI, same approach as the main window)
         const int DW = 680, DH = 520, PX = 20, PY = 108, PW = 640, PH = 344, RowS = 56, VY = PY + 4, VH = PH - 8;
         float u = U;
@@ -1371,7 +1371,7 @@ class Wired : Form
 
         var tb = new TextBox
         {
-            BorderStyle = BorderStyle.None, BackColor = fieldBg, ForeColor = ICE2, Font = fIn, MaxLength = 120, PlaceholderText = spot ? "Search Spotify songs, artists…" : "Search YouTube songs, artists…",
+            BorderStyle = BorderStyle.None, BackColor = fieldBg, ForeColor = ICE2, Font = fIn, MaxLength = 120, PlaceholderText = "Search YouTube songs, artists…",
             Left = (int)((PX + 46) * u), Width = (int)((rClr2.X - 6 - (PX + 46)) * u)
         };
         tb.Top = (int)((rField.Y + rField.Height / 2f) * u) - tb.Height / 2;
@@ -1431,7 +1431,7 @@ class Wired : Form
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit; g.ScaleTransform(u, u);
 
             // header
-            Txt(g, spot ? "SEARCH SPOTIFY" : "SEARCH YOUTUBE", fHdr, DM, PX, 15, 300);
+            Txt(g, "SEARCH YOUTUBE", fHdr, DM, PX, 15, 300);
             Hov(g, rClose2, hv == 1, true); Ico(g, I_CLOSE, rClose2.X + 16, rClose2.Y + 16, 6, hv == 1 ? WH : TX);
 
             // search field
@@ -1509,10 +1509,10 @@ class Wired : Form
 
             // footer: status + actions
             string stx; var stc = DM;
-            if (busy) stx = spot ? "Searching Spotify…" : "Searching YouTube…";
+            if (busy) stx = "Searching YouTube…";
             else if (note.Length > 0) { stx = note; stc = ICE; }
             else if (results.Count > 0) stx = results.Count + (results.Count == 1 ? " result" : " results") + "  ·  ↑ ↓ browse  ·  Enter plays";
-            else stx = spot ? "Results from Spotify  ·  plays via YouTube" : "Results from YouTube";
+            else stx = "Results from YouTube";
             Txt(g, stx, fXs, stc, PX + 4, 477, rBPlay.X - PX - 16);
             bool en = sel >= 0 && !busy;
             Btn(g, rBPlay, "Play", I_PLAY, hv == 4, true, en); Btn(g, rBQ, "+ Queue", -1, hv == 5, false, en); Btn(g, rBDl, "Download MP3", I_DOWN, hv == 6, false, en);
@@ -1522,12 +1522,11 @@ class Wired : Form
         async Task Search()
         {
             var q = tb.Text.Trim().Replace("\"", "").Replace("\\", ""); if (q.Length == 0 || busy) return;
-            if (IsSpotify(tb.Text)) { if (!spot) { note = "That is a Spotify link - use Search Spotify or Add Spotify link"; surf.Invalidate(); return; } var raw = tb.Text.Trim(); after = () => AddSpotify(raw); f.Close(); return; }
+            if (IsSpotify(tb.Text)) { var raw = tb.Text.Trim(); after = () => AddSpotify(raw); f.Close(); return; }
             int my = ++sgen; busy = true; note = ""; lastQ = tb.Text.Trim(); anim.Start(); surf.Invalidate();
             try
             {
-                var j = spot ? "{}" : await Ytdlp($"-J --flat-playlist --no-warnings \"ytsearch12:{q}\"");
-                List<Track> sf = spot ? await SpSearch(lastQ) : null;
+                var j = await Ytdlp($"-J --flat-playlist --no-warnings \"ytsearch12:{q}\"");
                 if (closed || my != sgen) return;
                 using var d = System.Text.Json.JsonDocument.Parse(j); results.Clear(); sel = -1; scrollY = 0; eErr = false;
                 foreach (var tbm in thumbs.Values) tbm.Dispose(); thumbs.Clear();
@@ -1539,7 +1538,6 @@ class Wired : Form
                         results.Add(YtFix(new Track { Url = "https://www.youtube.com/watch?v=" + id, Title = S(el, "title") ?? "Untitled", Artist = S(el, "channel") ?? S(el, "uploader") ?? "YouTube", Album = "YouTube",
                             Dur = el.TryGetProperty("duration", out var du) && du.ValueKind == System.Text.Json.JsonValueKind.Number ? du.GetDouble() : 0 }));
                     }
-                if (sf != null) results.AddRange(sf);
                 if (results.Count == 0) { eT = "No results"; eS = "Try different keywords"; } else sel = 0;
                 foreach (var r0 in results.ToList())
                 {
@@ -1726,8 +1724,6 @@ class Wired : Form
         Item("Open files...", PickFiles); Item("Open folder...", OpenDir);
         m.Items.Add(new ToolStripSeparator());
         Item("Search YouTube...", () => OpenSearch()); Item("Add YouTube link...", OpenYt);
-        m.Items.Add(new ToolStripSeparator());
-        Item("Search Spotify...", () => OpenSearch(true)); Item("Add Spotify link...", () => OpenSpotify()); Item("Download from Spotify link...", () => OpenSpotify(true)); Item("Spotify keys...", () => AskSpotifyKeys());
         m.Items.Add(new ToolStripSeparator());
         Item("Download all online tracks...", () => Download(pl.ToList()));
         m.Items.Add(new ToolStripSeparator());
