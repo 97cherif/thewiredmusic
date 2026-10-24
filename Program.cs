@@ -82,6 +82,8 @@ class Buffered : ISampleProvider, IDisposable
 }
 
 class PersistTrack { public string Url { get; set; } public string Path { get; set; } public string Title { get; set; } public string Artist { get; set; } public string Album { get; set; } public string Year { get; set; } public double Dur { get; set; } public bool Saved { get; set; } public string ArtUrl { get; set; } public bool Spot { get; set; } }
+class SavedPl { public string Name { get; set; } public List<PersistTrack> Tracks { get; set; } = new(); }
+class PlData { public List<SavedPl> Lists { get; set; } = new(); }
 class PersistData { public List<PersistTrack> Tracks { get; set; } = new(); public int Cur { get; set; } = -1; public float Vol { get; set; } = .6f; public bool Shuf { get; set; } public bool Rep { get; set; } }
 
 class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Bitmap Art; public bool Saved, HadTitle, Real, Thumbing, Spot, LyrOff; public string ArtUrl; public List<(double t, string s)> Sync; public int LyrSt; /* 0 idle, 1 searching, 3 not found */ }
@@ -121,6 +123,8 @@ class Wired : Form
 
     // ---------- state ----------
     readonly List<Track> pl = new(); int cur = -1, scroll, lyrY; float lyPos;
+    // playlists: "pl" is always the list being played - the default Queue (curName == null) or one saved playlist
+    readonly List<SavedPl> saved = new(); string curName; List<Track> queueStash; int view, plScroll; Rectangle rTabQ, rTabP, rSave;
     WaveOutEvent wo; WaveStream rd; Buffered buf; VolumeSampleProvider vsp; Tap tap; int gen;
     bool playing, shuf, rep, mute, dragSeek, dragVol; float vol = .6f, seekFrac;
     readonly float[] bars = new float[48], spec = new float[48], snap = new float[1024], win = new float[1024];
@@ -160,7 +164,7 @@ class Wired : Form
         FormClosing += (s, e) => SaveState();
         try { System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency; } catch { }
         try { System.Diagnostics.Process.GetCurrentProcess().PriorityClass = System.Diagnostics.ProcessPriorityClass.AboveNormal; } catch { }
-        LoadState();
+        LoadState(); LoadPlaylists();
         Shown += (s, e) => { ReloadMeta(); UpdateYtdlp(); };
         Relayout();
     }
@@ -932,6 +936,7 @@ class Wired : Form
         rBF = new Rectangle(bx0, by0, bw, 32); rBY = new Rectangle(bx0 + (bw + gap), by0, bw, 32); rBS = new Rectangle(bx0 + 2 * (bw + gap), by0, spw, 32);
         rDT = new Rectangle(bx0 + 2 * (bw + gap) + spw + gap, by0, bw, 32); rDA = new Rectangle(bx0 + 3 * (bw + gap) + spw + gap, by0, bw, 32);
         rClr = new Rectangle(rPl.Right - 16 - 64, rPl.Y + 10, 64, 24);
+        rTabQ = new Rectangle(rPl.X + 14, rPl.Y + 10, 82, 24); rTabP = new Rectangle(rTabQ.Right + 4, rPl.Y + 10, 80, 24); rSave = new Rectangle(rClr.X - 4 - 52, rPl.Y + 10, 52, 24);
         rList = new Rectangle(rPl.X + 6, rPl.Y + 44, rPl.Width - 12, Math.Max(RowH, by0 - 10 - (rPl.Y + 44)));
         scroll = Math.Clamp(scroll, 0, Math.Max(0, pl.Count - Rows));
         bgDirty = true; Invalidate();
@@ -1325,12 +1330,18 @@ class Wired : Form
 
     void DrawPl(Graphics g)
     {
-        if (pl.Count > 0)
+        string Sh(string v, int n) => v.Length > n ? v.Substring(0, n - 1) + "…" : v;
+        Pill(g, rTabQ, curName == null ? (pl.Count > 0 ? "Queue · " + pl.Count : "Queue") : Sh(curName, 9), hid == 40, view == 0);
+        Pill(g, rTabP, "Playlists", hid == 41, view == 1);
+        if (view == 1) Pill(g, rClr, "+ New", hid == 43, false);
+        else if (pl.Count > 0)
         {
-            Txt(g, pl.Count + (pl.Count == 1 ? " track" : " tracks"), fXs, DM, rPl.X + 18, rPl.Y + 16, rPl.Width - 100);
             bool arm = clrArm != 0 && Environment.TickCount - clrArm < 3000; Pill(g, rClr, arm ? "Sure?" : "Clear", hid == 24, arm);
+            if (curName == null) Pill(g, rSave, "Save", hid == 42, false);
         }
-        else TxtIn(g, "Drop music here", fRow, DM, new RectangleF(rPl.X, rList.Y, rPl.Width, rList.Height), sfCC);
+        else TxtIn(g, curName == null ? "Drop music here" : "Empty playlist - drop music here", fRow, DM, new RectangleF(rPl.X, rList.Y, rPl.Width, rList.Height), sfCC);
+        if (view == 1) DrawPlaylists(g);
+        else {
         var st = g.Save(); g.SetClip(rList);
         int rows = Rows, hr = hid >= 100000 ? hid % 100000 : -1, dlX = rList.Right - 12 - 40 - 26;
         for (int i = 0; i < rows && scroll + i < pl.Count; i++)
@@ -1346,9 +1357,118 @@ class Wired : Form
             if (tk.Url != null) { bool h2 = hid == 200000 + k; if (tk.Saved) Ico(g, I_CHECK, dlX + 11, y + RowH / 2f, 5.5f, ICE); else Ico(g, I_DOWN, dlX + 11, y + RowH / 2f, 5.5f, h2 ? WH : DM); }
         }
         g.Restore(st);
+        }
         Pill(g, rBF, "+ Files", hid == 20, false); Pill(g, rBY, "+ Link", hid == 21, true); DrawSpBtn(g); Pill(g, rDT, "↓ Song", hid == 22, false);
         Pill(g, rDA, dlBusy ? "■ Stop" : "↓ All", hid == 23, dlBusy);
     }
+    // ---------- playlists view: the default Queue first, then every saved playlist ----------
+    void DrawPlaylists(Graphics g)
+    {
+        int total = saved.Count + 1, rows = Rows, hr = hid >= 300000 ? hid - 300000 : -1;
+        var st = g.Save(); g.SetClip(rList);
+        for (int i = 0; i < rows && plScroll + i < total; i++)
+        {
+            int k = plScroll + i, y = rList.Y + i * RowH; bool isQ = k == 0; var sp = isQ ? null : saved[k - 1];
+            bool act = isQ ? curName == null : sp.Name == curName;
+            int cnt = isQ ? (curName == null ? pl.Count : (queueStash?.Count ?? 0)) : (act ? pl.Count : sp.Tracks.Count);
+            var rr = new RectangleF(rList.X, y + 1, rList.Width, RowH - 2);
+            if (act) FillRR(g, Br(Al(ICE, 28)), rr, 16); else if (k == hr) FillRR(g, Br(Al(WH, 12)), rr, 16);
+            float x = rList.X + 12; if (act) g.FillEllipse(Br(ICE), x + 2, y + RowH / 2f - 3, 6, 6); else Txt(g, isQ ? "♪" : (k).ToString(), fXs, DM, x, y + 12, 24);
+            float tx = x + 26, right = rList.Right - 14;
+            Txt(g, isQ ? "Queue" : sp.Name, fRow, act ? WH : TX, tx, y + 4, right - tx);
+            Txt(g, (isQ ? "Default · " : "") + (cnt == 1 ? "1 song" : cnt + " songs") + (act ? " · playing from here" : ""), fXs, DM, tx, y + 21, right - tx);
+        }
+        if (saved.Count == 0 && rows >= 4)
+        {
+            float hy = rList.Y + RowH + 16;
+            TxtIn(g, "No playlists yet", fRow, DM, new RectangleF(rList.X, hy, rList.Width, 24), sfCC);
+            TxtIn(g, "Press + New, or press Save in the Queue tab,", fXs, DM, new RectangleF(rList.X, hy + 26, rList.Width, 18), sfCC);
+            TxtIn(g, "or right-click any song > Add to playlist", fXs, DM, new RectangleF(rList.X, hy + 44, rList.Width, 18), sfCC);
+        }
+        g.Restore(st);
+    }
+
+    // ---------- playlists: saving, switching, editing ----------
+    static string PlFile => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic", "playlists.json");
+    static PersistTrack ToP(Track t) => new PersistTrack { Url = t.Url, Path = t.Path, Title = t.Title, Artist = t.Artist, Album = t.Album, Year = t.Year, Dur = t.Dur, Saved = t.Saved, ArtUrl = t.ArtUrl, Spot = t.Spot };
+    Track FromP(PersistTrack s) => new Track { Url = s.Url, Path = s.Path, Title = s.Title ?? "", Artist = s.Artist ?? "Unknown", Album = s.Album ?? "", Year = s.Year ?? "", Dur = s.Dur, Saved = s.Saved, ArtUrl = s.ArtUrl, Spot = s.Spot, Art = RandomCover() };
+    void LoadPlaylists()
+    {
+        try { if (System.IO.File.Exists(PlFile)) { var d = JsonSerializer.Deserialize<PlData>(System.IO.File.ReadAllText(PlFile)); if (d?.Lists != null) saved.AddRange(d.Lists.Where(x => !string.IsNullOrWhiteSpace(x.Name))); } } catch { }
+    }
+    void SavePlaylists()
+    {
+        try { Directory.CreateDirectory(System.IO.Path.GetDirectoryName(PlFile)); System.IO.File.WriteAllText(PlFile, JsonSerializer.Serialize(new PlData { Lists = saved })); } catch { }
+    }
+    void FlushActive() // keeps the playlist you are editing saved
+    {
+        if (curName == null) return; var sp = saved.FirstOrDefault(x => x.Name == curName); if (sp == null) return;
+        sp.Tracks = pl.Select(ToP).ToList(); SavePlaylists();
+    }
+    string UniqueName(string n)
+    {
+        n = n.Trim(); if (n.Length > 60) n = n.Substring(0, 60); string b = n; int i = 2;
+        while (saved.Any(x => x.Name.Equals(n, StringComparison.OrdinalIgnoreCase)) || n.Equals("Queue", StringComparison.OrdinalIgnoreCase)) n = b + " " + i++;
+        return n;
+    }
+    void SaveAsPlaylist() // saves the Queue as a playlist (the Queue itself stays as it is)
+    {
+        var src = curName == null ? pl : (queueStash ?? new List<Track>());
+        if (src.Count == 0) { St("Add some songs to the queue first", 4000); return; }
+        var n = Ask("Name your playlist", "", "\u0001", "Save"); if (string.IsNullOrWhiteSpace(n)) return;
+        n = UniqueName(n); saved.Add(new SavedPl { Name = n, Tracks = src.Select(ToP).ToList() }); SavePlaylists();
+        St($"Saved playlist \"{n}\" - find it in Playlists", 5000); Invalidate();
+    }
+    void NewPlaylist()
+    {
+        var n = Ask("Name your new playlist", "", "\u0001", "Create"); if (string.IsNullOrWhiteSpace(n)) return;
+        n = UniqueName(n); saved.Add(new SavedPl { Name = n }); SavePlaylists(); view = 1; St($"Created \"{n}\" - right-click songs to add them", 5000); Invalidate();
+    }
+    void AddToPlaylist(Track t, string name)
+    {
+        var sp = saved.FirstOrDefault(x => x.Name == name); if (sp == null) return;
+        if (sp.Tracks.Any(x => x.Path == t.Path && x.Url == t.Url && x.Title == t.Title)) { St($"Already in \"{name}\"", 3500); return; }
+        sp.Tracks.Add(ToP(t)); SavePlaylists(); St($"Added to \"{name}\"", 3500); Invalidate();
+    }
+    void RenamePlaylist(string old)
+    {
+        var sp = saved.FirstOrDefault(x => x.Name == old); if (sp == null) return;
+        var n = Ask("Rename playlist", old, "\u0001", "Rename"); if (string.IsNullOrWhiteSpace(n) || n.Trim() == old) return;
+        n = UniqueName(n); sp.Name = n; if (curName == old) curName = n; SavePlaylists(); Invalidate();
+    }
+    void DeletePlaylist(string name)
+    {
+        if (MessageBox.Show(this, $"Delete playlist \"{name}\"?", "THE WIRED MUSIC", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        if (curName == name) SwitchTo(null);
+        saved.RemoveAll(x => x.Name == name); SavePlaylists(); plScroll = Math.Clamp(plScroll, 0, Math.Max(0, saved.Count + 1 - Rows)); Invalidate();
+    }
+    // name == null: back to the default Queue.  Otherwise open that playlist and start it.
+    void SwitchTo(string name)
+    {
+        if (name == curName) { view = 0; Invalidate(); return; }
+        SavedPl sp = null; if (name != null) { sp = saved.FirstOrDefault(x => x.Name == name); if (sp == null) return; }
+        Stop(); ++gen;
+        if (curName != null) FlushActive(); else queueStash = new List<Track>(pl);
+        List<Track> next;
+        if (sp == null) { next = queueStash ?? new List<Track>(); queueStash = null; } else next = sp.Tracks.Select(FromP).ToList();
+        pl.Clear(); pl.AddRange(next); curName = name; cur = -1; scroll = 0; posS = durS = 0; Text = "THE WIRED MUSIC"; view = 0; plScroll = 0; St("");
+        SaveState(); Relayout(); ReloadMeta();
+        if (name != null && pl.Count > 0) Play(0); else Invalidate();
+    }
+    void OpenPlRow(int k) { if (k == 0) SwitchTo(null); else if (k - 1 < saved.Count) SwitchTo(saved[k - 1].Name); }
+    void PlRowMenu(int k)
+    {
+        var m = NewMenu();
+        void Item(string txt, Action a) { var it = new ToolStripMenuItem(txt) { ForeColor = TX }; it.Click += (s, e) => { a(); Invalidate(); }; m.Items.Add(it); }
+        if (k == 0) { Item("Open queue", () => SwitchTo(null)); Item("Save queue as playlist...", SaveAsPlaylist); }
+        else if (k - 1 < saved.Count)
+        {
+            var name = saved[k - 1].Name;
+            Item("Open and play", () => SwitchTo(name)); Item("Rename...", () => RenamePlaylist(name)); Item("Delete playlist", () => DeletePlaylist(name));
+        }
+        m.Show(Cursor.Position);
+    }
+
     // Spotify logo with a small link badge merged into its corner (adds a Spotify song / album / playlist by link)
     void DrawSpBtn(Graphics g)
     {
@@ -1387,9 +1507,13 @@ class Wired : Form
         if (rVol.Width > 0 && Rectangle.Inflate(rVol, 8, 10).Contains(p)) return 16;
         for (int i = 0; i < 6; i++) if (rb[i].Contains(p)) return 10 + i;
         if (rBF.Contains(p)) return 20; if (rBY.Contains(p)) return 21; if (rBS.Contains(p)) return 25; if (rDT.Contains(p)) return 22; if (rDA.Contains(p)) return 23;
-        if (pl.Count > 0 && rClr.Contains(p)) return 24;
+        if (rTabQ.Contains(p)) return 40; if (rTabP.Contains(p)) return 41;
+        if (view == 1 && rClr.Contains(p)) return 43;
+        if (view == 0 && curName == null && pl.Count > 0 && rSave.Contains(p)) return 42;
+        if (view == 0 && pl.Count > 0 && rClr.Contains(p)) return 24;
+        if (view == 1 && rList.Contains(p)) { int pk = plScroll + (p.Y - rList.Y) / RowH; return pk < saved.Count + 1 ? 300000 + pk : 0; }
         if (cur >= 0 && cur < pl.Count && rLyBtn.Contains(p)) return 30;
-        if (rList.Contains(p)) { int k = scroll + (p.Y - rList.Y) / RowH; if (k < pl.Count) return (pl[k].Url != null && p.X > rList.Right - 12 - 40 - 28 && p.X < rList.Right - 12 - 40) ? 200000 + k : 100000 + k; }
+        if (view == 0 && rList.Contains(p)) { int k = scroll + (p.Y - rList.Y) / RowH; if (k < pl.Count) return (pl[k].Url != null && p.X > rList.Right - 12 - 40 - 28 && p.X < rList.Right - 12 - 40) ? 200000 + k : 100000 + k; }
         return 0;
     }
     void SeekTo(int x) { seekFrac = (float)Math.Clamp((x - rSeek.X) / (double)rSeek.Width, 0, .999); }
@@ -1401,7 +1525,7 @@ class Wired : Form
     protected override void OnMouseDown(MouseEventArgs e)
     {
         var p = V(e.Location); int id = Hit(p);
-        if (e.Button == MouseButtons.Right) { if (id >= 100000) RowMenu(id % 100000); return; }
+        if (e.Button == MouseButtons.Right) { if (id >= 300000) PlRowMenu(id - 300000); else if (id >= 100000) RowMenu(id % 100000); return; }
         if (e.Button != MouseButtons.Left) return;
         if (p.Y < HdrH && id == 0) { ReleaseCapture(); SendMessage(Handle, 0xA1, 2, 0); return; }
         switch (id)
@@ -1412,6 +1536,10 @@ class Wired : Form
             case 4: ShowMenu(); return;
             case 5: OpenSearch(); return;
             case 30: LyrClick(); return;
+            case 40: view = 0; Invalidate(); return;
+            case 41: view = 1; plScroll = 0; Invalidate(); return;
+            case 42: SaveAsPlaylist(); return;
+            case 43: NewPlaylist(); return;
             case 24: if (clrArm != 0 && Environment.TickCount - clrArm < 3000) { clrArm = 0; ClearAll(); } else clrArm = Environment.TickCount; Invalidate(); return;
             case 17: dragSeek = true; SeekTo(p.X); Inv(rNow); return;
             case 16: dragVol = true; SetVol(p.X); Inv(rNow); return;
@@ -1421,6 +1549,7 @@ class Wired : Form
             case 22: if (cur >= 0) Download(new List<Track> { pl[cur] }); return;
             case 23: if (dlBusy) StopDl(); else Download(pl.ToList()); return;
         }
+        if (id >= 300000) { OpenPlRow(id - 300000); return; }
         if (id >= 200000) Download(new List<Track> { pl[id - 200000] }); else if (id >= 100000) Play(id - 100000);
         Invalidate();
     }
@@ -1436,7 +1565,7 @@ class Wired : Form
     protected override void OnMouseWheel(MouseEventArgs e)
     {
         var p = V(e.Location);
-        if (rPl.Contains(p)) { scroll = Math.Clamp(scroll - Math.Sign(e.Delta) * 3, 0, Math.Max(0, pl.Count - Rows)); Invalidate(); }
+        if (rPl.Contains(p)) { if (view == 1) plScroll = Math.Clamp(plScroll - Math.Sign(e.Delta) * 3, 0, Math.Max(0, saved.Count + 1 - Rows)); else scroll = Math.Clamp(scroll - Math.Sign(e.Delta) * 3, 0, Math.Max(0, pl.Count - Rows)); Invalidate(); }
         else if (rVis.Contains(p) && cur >= 0 && cur < pl.Count && LyrShown(pl[cur]) && pl[cur].Sync == null)
         {
             using var gg = CreateGraphics(); gg.ScaleTransform(U, U); float need = gg.MeasureString(pl[cur].Lyr ?? "", fLyrM, rVis.Width - 60, sfWC).Height;
@@ -1730,8 +1859,9 @@ class Wired : Form
     {
         try
         {
-            var d = new PersistData { Cur = cur, Vol = vol, Shuf = shuf, Rep = rep };
-            foreach (var t in pl) d.Tracks.Add(new PersistTrack { Url = t.Url, Path = t.Path, Title = t.Title, Artist = t.Artist, Album = t.Album, Year = t.Year, Dur = t.Dur, Saved = t.Saved, ArtUrl = t.ArtUrl, Spot = t.Spot });
+            if (curName != null) FlushActive();
+            var d = new PersistData { Cur = curName == null ? cur : -1, Vol = vol, Shuf = shuf, Rep = rep };
+            foreach (var t in (curName == null ? pl : (queueStash ?? new List<Track>()))) d.Tracks.Add(ToP(t));
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(StateFile)); System.IO.File.WriteAllText(StateFile, System.Text.Json.JsonSerializer.Serialize(d));
         }
         catch { }
@@ -1812,6 +1942,18 @@ class Wired : Form
         if (k < 0 || k >= pl.Count) return; var t = pl[k]; var m = NewMenu();
         void Item(string txt, Action a) { var it = new ToolStripMenuItem(txt) { ForeColor = TX }; it.Click += (s, e) => { a(); Invalidate(); }; m.Items.Add(it); }
         Item("Play", () => Play(k)); Item("Set artist...", () => SetArtist(k));
+        {
+            var sub = new ToolStripMenuItem("Add to playlist") { ForeColor = TX };
+            sub.DropDown.BackColor = Color.FromArgb(10, 16, 22); sub.DropDown.ForeColor = TX; if (sub.DropDown is ToolStripDropDownMenu dm) dm.ShowImageMargin = false;
+            foreach (var sp in saved.Where(x => x.Name != curName).ToList())
+            {
+                var nm = sp.Name; var si = new ToolStripMenuItem(nm) { ForeColor = TX }; si.Click += (s, e) => AddToPlaylist(t, nm); sub.DropDownItems.Add(si);
+            }
+            if (sub.DropDownItems.Count > 0) sub.DropDownItems.Add(new ToolStripSeparator());
+            var ni = new ToolStripMenuItem("New playlist...") { ForeColor = TX };
+            ni.Click += (s, e) => { var n = Ask("Name your new playlist", "", "\u0001", "Create"); if (string.IsNullOrWhiteSpace(n)) return; n = UniqueName(n); saved.Add(new SavedPl { Name = n }); AddToPlaylist(t, n); };
+            sub.DropDownItems.Add(ni); m.Items.Add(sub);
+        }
         if (t.Path != null) Item("Show in folder", () => { try { System.Diagnostics.Process.Start("explorer.exe", "/select,\"" + t.Path + "\""); } catch { } });
         Item("Remove from playlist", () => RemoveAt(k));
         m.Show(Cursor.Position);
@@ -1837,6 +1979,8 @@ class Wired : Form
         Item("Download all online tracks...", () => Download(pl.ToList()));
         m.Items.Add(new ToolStripSeparator());
         Item("Shuffle", () => shuf = !shuf, shuf); Item("Repeat", () => rep = !rep, rep);
+        m.Items.Add(new ToolStripSeparator());
+        Item("Playlists...", () => view = 1); Item("Save queue as playlist...", SaveAsPlaylist); Item("New playlist...", NewPlaylist);
         m.Items.Add(new ToolStripSeparator());
         Item("Clear playlist", ClearAll);
         Item("About", About); Item("Exit", Close);
