@@ -2,6 +2,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using NAudio.Dsp;
@@ -80,10 +81,11 @@ class Buffered : ISampleProvider, IDisposable
     public void Dispose() { stop = true; try { th.Join(800); } catch { } }
 }
 
-class PersistTrack { public string Url { get; set; } public string Path { get; set; } public string Title { get; set; } public string Artist { get; set; } public string Album { get; set; } public string Year { get; set; } public double Dur { get; set; } public bool Saved { get; set; } }
+class PersistTrack { public string Url { get; set; } public string Path { get; set; } public string Title { get; set; } public string Artist { get; set; } public string Album { get; set; } public string Year { get; set; } public double Dur { get; set; } public bool Saved { get; set; } public string ArtUrl { get; set; } public bool Spot { get; set; } }
 class PersistData { public List<PersistTrack> Tracks { get; set; } = new(); public int Cur { get; set; } = -1; public float Vol { get; set; } = .6f; public bool Shuf { get; set; } public bool Rep { get; set; } }
 
-class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Bitmap Art; public bool Saved, HadTitle, Real, Thumbing; }
+class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Bitmap Art; public bool Saved, HadTitle, Real, Thumbing, Spot; public string ArtUrl; }
+class SpInfo { public string Kind, Name, Art; public List<Track> Tracks = new(); }
 
 class Wired : Form
 {
@@ -144,7 +146,11 @@ class Wired : Form
         for (int i = 0; i < 1024; i++) win[i] = (float)FastFourierTransform.HammingWindow(i, 1024);
         var rn = new Random(7); for (int i = 0; i < bx.Length; i++) { bx[i] = (float)rn.NextDouble(); by[i] = (float)rn.NextDouble(); bv[i] = .4f + (float)rn.NextDouble(); bsz[i] = 2f + (float)rn.NextDouble() * 3f; bph[i] = (float)rn.NextDouble() * 6.28f; }
         DragEnter += (s, e) => e.Effect = DragDropEffects.Copy;
-        DragDrop += (s, e) => Add((string[])e.Data.GetData(DataFormats.FileDrop));
+        DragDrop += (s, e) =>
+        {
+            if (e.Data.GetDataPresent(DataFormats.FileDrop)) Add((string[])e.Data.GetData(DataFormats.FileDrop));
+            else if (e.Data.GetDataPresent(DataFormats.Text)) { var tx = ((string)e.Data.GetData(DataFormats.Text) ?? "").Trim(); if (IsSpotify(tx)) AddSpotify(tx); else if (tx.Contains("youtu")) AddYt(tx); }
+        };
         var t = new System.Windows.Forms.Timer { Interval = 16 };
         t.Tick += (s, e) => Tick(); t.Start();
         FormClosed += (s, e) => Stop();
@@ -322,12 +328,28 @@ class Wired : Form
         catch { return null; }
         finally { thumbSem.Release(); }
     }
+    static Bitmap LoadArt(string url)
+    {
+        thumbSem.Wait();
+        try
+        {
+            var f = System.IO.Path.Combine(CacheDir(), "sp_" + Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(url))).Substring(0, 16) + ".jpg");
+            if (!System.IO.File.Exists(f))
+            {
+                using var h = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+                System.IO.File.WriteAllBytes(f, h.GetByteArrayAsync(url).GetAwaiter().GetResult());
+            }
+            using var im = Image.FromFile(f); return Square(im, 320);
+        }
+        catch { return null; }
+        finally { thumbSem.Release(); }
+    }
     void Thumb(Track t)
     {
         if (t.Real || t.Thumbing || t.Url == null) return; t.Thumbing = true;
         Task.Run(() =>
         {
-            var bm = LoadThumb(t.Url);
+            var bm = (t.ArtUrl != null ? LoadArt(t.ArtUrl) : null) ?? LoadThumb(t.Url);
             try { BeginInvoke(new Action(() => { t.Thumbing = false; if (bm != null) { t.Art = bm; t.Real = true; if (artFor == t) artFor = null; Invalidate(); } })); } catch { }
         });
     }
@@ -419,7 +441,7 @@ class Wired : Form
         using var f = new Form { FormBorderStyle = FormBorderStyle.None, Size = new Size(580, 132), StartPosition = FormStartPosition.CenterParent, BackColor = Color.FromArgb(10, 16, 22), ShowInTaskbar = false };
         f.Paint += (s, e) => { e.Graphics.DrawRectangle(Pe(Al(ICE, 60), 1), 0, 0, f.Width - 1, f.Height - 1); using var fn = new Font("Segoe UI", 9.5f); e.Graphics.DrawString(title, fn, Br(DM), 16, 14); };
         var tb = new TextBox { Left = 16, Top = 44, Width = 548, BorderStyle = BorderStyle.FixedSingle, BackColor = BG, ForeColor = ICE2, Font = new Font("Segoe UI", 10.5f) };
-        tb.Text = init; if (init.Length == 0 && Clipboard.ContainsText() && Clipboard.GetText().Contains("youtu")) tb.Text = Clipboard.GetText().Trim();
+        tb.Text = init; if (init.Length == 0 && Clipboard.ContainsText() && (Clipboard.GetText().Contains("youtu") || Clipboard.GetText().Contains("spotify"))) tb.Text = Clipboard.GetText().Trim();
         var ok = Flat("Add", 340, 86, ICE); ok.DialogResult = DialogResult.OK; var no = Flat("Cancel", 456, 86, TX); no.DialogResult = DialogResult.Cancel;
         f.Controls.Add(tb); f.Controls.Add(ok); f.Controls.Add(no); f.AcceptButton = ok; f.CancelButton = no; f.Shown += (s, e) => { tb.Focus(); tb.SelectAll(); };
         return f.ShowDialog() == DialogResult.OK ? tb.Text.Trim() : null;
@@ -438,7 +460,7 @@ class Wired : Form
     async void Download(List<Track> list)
     {
         list = list.Where(t => t.Url != null).ToList();
-        if (list.Count == 0) { St("Add a YouTube link first", 4000); return; }
+        if (list.Count == 0) { St("Add an online song first", 4000); return; }
         if (dlBusy) { St("A download is already running", 4000); return; }
         using var d = new FolderBrowserDialog { Description = "Choose where to save the music" };
         if (d.ShowDialog() != DialogResult.OK) return;
@@ -447,29 +469,32 @@ class Wired : Form
         {
             if (dlCancel) break;
             var t = list[i]; St($"Downloading {i + 1}/{list.Count}: {t.Title}");
+            if (t.Spot) { try { await RealUrl(t); } catch { continue; } if (dlCancel) break; }
+            var nm = SafeName(t.Spot ? t.Artist + " - " + t.Title : t.Title);
             var cf = CachedFile(t.Url);
             if (cf != null)
             {
                 try
                 {
-                    var nm = string.Concat(t.Title.Select(c => System.IO.Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
-                    System.IO.File.Copy(cf, System.IO.Path.Combine(d.SelectedPath, nm + ".mp3"), true); ok++; t.Saved = true; continue;
+                    var dst = System.IO.Path.Combine(d.SelectedPath, nm + ".mp3");
+                    System.IO.File.Copy(cf, dst, true); if (t.Spot) await Task.Run(() => TagSpotify(dst, t)); ok++; t.Saved = true; continue;
                 }
                 catch { }
             }
             try
             {
                 var ff = await Ffmpeg(msg => St(msg));
-                var o = await Ytdlp($"-f bestaudio -x --audio-format mp3 --audio-quality 0 --ffmpeg-location \"{ff}\" --no-playlist --no-warnings --no-simulate --print after_move:filepath -o \"{tpl}\" \"{t.Url}\"", p => dlProc = p);
+                var tp2 = t.Spot ? System.IO.Path.Combine(d.SelectedPath, nm.Replace("%", "%%") + ".%(ext)s") : tpl;
+                var o = await Ytdlp($"-f bestaudio -x --audio-format mp3 --audio-quality 0 --ffmpeg-location \"{ff}\" --no-playlist --no-warnings --no-simulate --print after_move:filepath -o \"{tp2}\" \"{t.Url}\"", p => dlProc = p);
                 var path = o.Trim().Split('\n').Last().Trim();
-                if (System.IO.File.Exists(path)) { ok++; t.Saved = true; }
+                if (System.IO.File.Exists(path)) { if (t.Spot) await Task.Run(() => TagSpotify(path, t)); ok++; t.Saved = true; }
             }
             catch { }
         }
         if (dlCancel) { try { foreach (var f in Directory.GetFiles(d.SelectedPath)) if ((f.EndsWith(".part") || f.EndsWith(".ytdl")) && System.IO.File.GetLastWriteTime(f) >= t0.AddSeconds(-2)) System.IO.File.Delete(f); } catch { } }
         dlBusy = false; dlProc = null; St(dlCancel ? $"Stopped - {ok} song(s) kept" : $"Downloaded {ok}/{list.Count}", 6000); Invalidate();
     }
-    void OpenYt() { var u = Ask("Paste a YouTube video or playlist link"); if (!string.IsNullOrEmpty(u)) AddYt(u); }
+    void OpenYt() { var u = Ask("Paste a YouTube video or playlist link"); if (!string.IsNullOrEmpty(u)) { if (IsSpotify(u)) AddSpotify(u); else AddYt(u); } }
     async void AddYt(string url)
     {
         St("Connecting...");
@@ -490,6 +515,224 @@ class Wired : Form
         }
         catch (Exception ex) { St("Couldn't connect: " + ex.Message, 6000); }
     }
+    // ---------- Spotify ----------
+    // Spotify streams are DRM-protected, so (like spotDL) we read the song list from Spotify and play/download the matching audio from YouTube.
+    static readonly Regex SpRx = new(@"(?:spotify\.com/(?:[^\s?#]*/)?|spotify:(?:user:[^:\s]+:)?)(track|album|playlist)[/:]([A-Za-z0-9]{22})", RegexOptions.IgnoreCase);
+    static bool IsSpotify(string s) { s = s?.Trim() ?? ""; return s.Length < 400 && !s.Contains('\n') && (s.Contains("spotify.com/") || s.Contains("spotify.link/") || s.StartsWith("spotify:")); }
+    static HttpClient SpHttp()
+    {
+        var h = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        h.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36");
+        h.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9"); return h;
+    }
+    static string JStr(JsonElement e, string k) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+    static double JNum(JsonElement e, string k) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : 0;
+    static string SafeName(string s) { s = string.Concat((s ?? "").Select(c => System.IO.Path.GetInvalidFileNameChars().Contains(c) ? '_' : c)).Trim(); return s.Length == 0 ? "track" : s; }
+
+    static Track SpTrack(string title, string artist, string album, double sec, string art)
+    {
+        title = (title ?? "").Trim(); artist = (artist ?? "").Replace('\u00a0', ' ').Trim();
+        var q = (artist + " - " + title).Replace("\"", "").Replace("\\", "").Trim();
+        return new Track { Spot = true, Url = "ytsearch1:" + q, Title = title, Artist = artist.Length > 0 ? artist : "Spotify", Album = string.IsNullOrEmpty(album) ? "Spotify" : album, Dur = sec, ArtUrl = art };
+    }
+    static string BestImg(JsonElement e)
+    {
+        string best = null; double bw = -1;
+        void Scan(JsonElement arr)
+        {
+            if (arr.ValueKind != JsonValueKind.Array) return;
+            foreach (var x in arr.EnumerateArray()) { var u = JStr(x, "url"); if (u == null) continue; double w = Math.Max(JNum(x, "width"), JNum(x, "maxWidth")); if (w >= bw) { bw = w; best = u; } }
+        }
+        if (e.TryGetProperty("coverArt", out var ca) && ca.ValueKind == JsonValueKind.Object && ca.TryGetProperty("sources", out var cs)) Scan(cs);
+        if (best == null && e.TryGetProperty("visualIdentity", out var vi) && vi.ValueKind == JsonValueKind.Object && vi.TryGetProperty("image", out var im)) Scan(im);
+        return best;
+    }
+    static void ParseEmbed(string json, SpInfo info)
+    {
+        using var d = JsonDocument.Parse(json);
+        var ent = d.RootElement.GetProperty("props").GetProperty("pageProps").GetProperty("state").GetProperty("data").GetProperty("entity");
+        info.Name = JStr(ent, "name") ?? JStr(ent, "title"); info.Art = BestImg(ent);
+        if (info.Kind != "track" && ent.TryGetProperty("trackList", out var tl) && tl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var e in tl.EnumerateArray())
+            {
+                var title = JStr(e, "title"); if (string.IsNullOrWhiteSpace(title)) continue;
+                info.Tracks.Add(SpTrack(title, JStr(e, "subtitle"), info.Kind == "album" ? info.Name : null, JNum(e, "duration") / 1000.0, info.Kind == "album" ? info.Art : null));
+            }
+        }
+        else
+        {
+            string artists = null;
+            if (ent.TryGetProperty("artists", out var ar) && ar.ValueKind == JsonValueKind.Array) artists = string.Join(", ", ar.EnumerateArray().Select(x => JStr(x, "name")).Where(x => !string.IsNullOrWhiteSpace(x)));
+            artists ??= JStr(ent, "subtitle");
+            var title = JStr(ent, "name") ?? JStr(ent, "title");
+            if (!string.IsNullOrWhiteSpace(title)) info.Tracks.Add(SpTrack(title, artists, null, JNum(ent, "duration") / 1000.0, info.Art));
+        }
+    }
+    // reads a Spotify song / album / playlist link (no account or keys needed)
+    static async Task<SpInfo> SpFetch(string input)
+    {
+        input = input.Trim(); var m = SpRx.Match(input);
+        using var http = SpHttp();
+        if (!m.Success && input.Contains("spotify.link/")) // short share link: follow the redirect
+        {
+            var r = await http.GetAsync(input); m = SpRx.Match(r.RequestMessage.RequestUri.ToString());
+            if (!m.Success) m = SpRx.Match(await r.Content.ReadAsStringAsync());
+        }
+        if (!m.Success) throw new Exception("that isn't a Spotify song, album or playlist link");
+        string kind = m.Groups[1].Value.ToLower(), id = m.Groups[2].Value; var info = new SpInfo { Kind = kind };
+        try
+        {
+            var html = await http.GetStringAsync($"https://open.spotify.com/embed/{kind}/{id}");
+            var nd = Regex.Match(html, @"<script id=""__NEXT_DATA__""[^>]*>(.*?)</script>", RegexOptions.Singleline);
+            if (nd.Success) ParseEmbed(nd.Groups[1].Value, info);
+        }
+        catch { info.Tracks.Clear(); }
+        if (info.Tracks.Count == 0 && kind == "track") // fallback: the public page's meta tags
+        {
+            try
+            {
+                var page = await http.GetStringAsync($"https://open.spotify.com/track/{id}");
+                string Og(string pr) { var x = Regex.Match(page, "<meta[^>]+property=\"" + pr + "\"[^>]+content=\"([^\"]*)\""); return x.Success ? System.Net.WebUtility.HtmlDecode(x.Groups[1].Value) : null; }
+                var title = Og("og:title"); var parts = (Og("og:description") ?? "").Split('·').Select(x => x.Trim()).Where(x => x.Length > 0).ToList();
+                if (!string.IsNullOrWhiteSpace(title) && parts.Count > 0) info.Tracks.Add(SpTrack(title, parts[0], parts.Count >= 4 ? parts[1] : null, 0, Og("og:image")));
+            }
+            catch { }
+        }
+        if (info.Tracks.Count == 0) throw new Exception("couldn't read it (is the playlist private?)");
+        return info;
+    }
+
+    // finds the YouTube video that matches a Spotify song (closest length wins), then remembers it
+    static readonly Dictionary<string, string> spMap = new();
+    static async Task<string> RealUrl(Track t)
+    {
+        var u = t.Url; if (u == null || !u.StartsWith("ytsearch")) return u;
+        lock (spMap) if (spMap.TryGetValue(u, out var c)) { t.Url = c; return c; }
+        var q = u.Substring(u.IndexOf(':') + 1).Replace("\"", "").Replace("\\", ""); string best = null;
+        for (int attempt = 0; attempt < 2 && best == null; attempt++)
+        {
+            try
+            {
+                var j = await Ytdlp($"-J --flat-playlist --no-warnings \"ytsearch6:{q}\"");
+                using var d = JsonDocument.Parse(j);
+                if (d.RootElement.TryGetProperty("entries", out var en))
+                {
+                    string first = null, pick = null; double bd = 1e9;
+                    foreach (var e in en.EnumerateArray())
+                    {
+                        var id = JStr(e, "id"); if (id == null) continue; first ??= id;
+                        double du = JNum(e, "duration"); if (t.Dur > 0 && du > 0) { var df = Math.Abs(du - t.Dur); if (df < bd) { bd = df; pick = id; } }
+                    }
+                    var ch = pick != null && bd <= 8 ? pick : first;
+                    if (ch != null) best = "https://www.youtube.com/watch?v=" + ch;
+                }
+            }
+            catch { }
+            if (best == null && attempt == 0 && !ytUpdated) { ytUpdated = true; try { await Ytdlp("-U"); } catch { } }
+        }
+        if (best == null) throw new Exception("couldn't find this song - check your internet");
+        lock (spMap) spMap[u] = best; t.Url = best; return best;
+    }
+    // writes title / artist / album / cover into the downloaded MP3
+    static void TagSpotify(string path, Track t)
+    {
+        try
+        {
+            using var tf = TagLib.File.Create(path);
+            tf.Tag.Title = t.Title; tf.Tag.Performers = new[] { t.Artist };
+            if (!string.IsNullOrEmpty(t.Album) && t.Album != "Spotify") tf.Tag.Album = t.Album;
+            if (t.ArtUrl != null)
+            {
+                using var h = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+                tf.Tag.Pictures = new TagLib.IPicture[] { new TagLib.Picture(new TagLib.ByteVector(h.GetByteArrayAsync(t.ArtUrl).GetAwaiter().GetResult())) };
+            }
+            tf.Save();
+        }
+        catch { }
+    }
+    void OpenSpotify(bool dl = false)
+    {
+        var u = Ask(dl ? "Paste a Spotify song, album or playlist link to download" : "Paste a Spotify song, album or playlist link");
+        if (!string.IsNullOrEmpty(u)) AddSpotify(u, dl);
+    }
+    async void AddSpotify(string url, bool dl = false)
+    {
+        St("Reading Spotify link...");
+        try
+        {
+            var info = await SpFetch(url); int n = 0;
+            foreach (var t in info.Tracks) { t.Art = RandomCover(); pl.Add(t); n++; }
+            foreach (var t in info.Tracks) Thumb(t);
+            SaveState();
+            St(info.Kind == "track" ? "Added 1 song" : $"Added {n} songs from {info.Name}" + (info.Kind == "playlist" && n >= 100 ? " (Spotify only shows the first 100)" : ""), 6000);
+            if (cur < 0 && pl.Count > 0) Play(0); else Invalidate();
+            if (dl) Download(info.Tracks);
+        }
+        catch (Exception ex) { St("Couldn't add Spotify link: " + (ex.Message ?? "").Split('\n')[0], 7000); }
+    }
+
+    // ----- Spotify search (needs free developer keys: Client ID + Secret) -----
+    static string SpFile => System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic", "spotify.txt");
+    static string spTok; static DateTime spExp;
+    static (string id, string sec) SpCreds()
+    {
+        try { var l = System.IO.File.ReadAllLines(SpFile); if (l.Length >= 2 && l[0].Trim().Length > 0 && l[1].Trim().Length > 0) return (l[0].Trim(), l[1].Trim()); } catch { }
+        return (null, null);
+    }
+    static bool AskSpotifyKeys()
+    {
+        using var f = new Form { FormBorderStyle = FormBorderStyle.None, Size = new Size(580, 238), StartPosition = FormStartPosition.CenterParent, BackColor = Color.FromArgb(10, 16, 22), ShowInTaskbar = false };
+        f.Paint += (s, e) =>
+        {
+            e.Graphics.DrawRectangle(Pe(Al(ICE, 60), 1), 0, 0, f.Width - 1, f.Height - 1); using var fn = new Font("Segoe UI", 9.5f);
+            e.Graphics.DrawString("Searching Spotify needs free developer keys.\nGo to developer.spotify.com/dashboard, create an app,\nthen copy its Client ID and Client Secret here.\n(Pasting a Spotify link works without any keys.)", fn, Br(DM), new RectangleF(16, 12, 548, 80));
+        };
+        var idTb = new TextBox { Left = 16, Top = 96, Width = 548, BorderStyle = BorderStyle.FixedSingle, BackColor = BG, ForeColor = ICE2, Font = new Font("Segoe UI", 10.5f), PlaceholderText = "Client ID" };
+        var scTb = new TextBox { Left = 16, Top = 134, Width = 548, BorderStyle = BorderStyle.FixedSingle, BackColor = BG, ForeColor = ICE2, Font = new Font("Segoe UI", 10.5f), PlaceholderText = "Client Secret", UseSystemPasswordChar = true };
+        var ok = Flat("Save", 340, 188, ICE); ok.DialogResult = DialogResult.OK; var no = Flat("Cancel", 456, 188, TX); no.DialogResult = DialogResult.Cancel;
+        f.Controls.Add(idTb); f.Controls.Add(scTb); f.Controls.Add(ok); f.Controls.Add(no); f.AcceptButton = ok; f.CancelButton = no; f.Shown += (s, e) => idTb.Focus();
+        if (f.ShowDialog() != DialogResult.OK) return false;
+        var a = idTb.Text.Trim(); var b = scTb.Text.Trim(); if (a.Length == 0 || b.Length == 0) return false;
+        try { Directory.CreateDirectory(System.IO.Path.GetDirectoryName(SpFile)); System.IO.File.WriteAllLines(SpFile, new[] { a, b }); } catch { return false; }
+        spTok = null; return true;
+    }
+    static async Task<string> SpToken()
+    {
+        if (spTok != null && DateTime.Now < spExp) return spTok;
+        var (id, sec) = SpCreds(); if (id == null) throw new Exception("no Spotify keys yet (menu > Spotify keys...)");
+        using var h = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        var req = new HttpRequestMessage(HttpMethod.Post, "https://accounts.spotify.com/api/token") { Content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("grant_type", "client_credentials") }) };
+        req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(id + ":" + sec)));
+        var r = await h.SendAsync(req); var body = await r.Content.ReadAsStringAsync();
+        if (!r.IsSuccessStatusCode) throw new Exception("Spotify rejected the keys (menu > Spotify keys...)");
+        using var d = JsonDocument.Parse(body);
+        spTok = d.RootElement.GetProperty("access_token").GetString(); spExp = DateTime.Now.AddSeconds(Math.Max(60, d.RootElement.GetProperty("expires_in").GetInt32() - 60)); return spTok;
+    }
+    static async Task<List<Track>> SpSearch(string q)
+    {
+        var tok = await SpToken(); using var h = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        h.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", tok);
+        var r = await h.GetAsync("https://api.spotify.com/v1/search?type=track&limit=10&q=" + Uri.EscapeDataString(q));
+        if ((int)r.StatusCode == 429) throw new Exception("Spotify says slow down - try again in a bit");
+        if (!r.IsSuccessStatusCode) throw new Exception($"Spotify search failed ({(int)r.StatusCode})");
+        using var d = JsonDocument.Parse(await r.Content.ReadAsStringAsync()); var res = new List<Track>();
+        if (d.RootElement.TryGetProperty("tracks", out var tr) && tr.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+            foreach (var it in items.EnumerateArray())
+            {
+                if (it.ValueKind != JsonValueKind.Object) continue;
+                string artists = it.TryGetProperty("artists", out var ar) && ar.ValueKind == JsonValueKind.Array ? string.Join(", ", ar.EnumerateArray().Select(x => JStr(x, "name")).Where(x => !string.IsNullOrWhiteSpace(x))) : null;
+                string album = null, art = null; double bw = -1;
+                if (it.TryGetProperty("album", out var al) && al.ValueKind == JsonValueKind.Object)
+                {
+                    album = JStr(al, "name");
+                    if (al.TryGetProperty("images", out var ims) && ims.ValueKind == JsonValueKind.Array) foreach (var im in ims.EnumerateArray()) { var u = JStr(im, "url"); double w = JNum(im, "width"); if (u != null && w >= bw) { bw = w; art = u; } }
+                }
+                var title = JStr(it, "name"); if (!string.IsNullOrWhiteSpace(title)) res.Add(SpTrack(title, artists, album, JNum(it, "duration_ms") / 1000.0, art));
+            }
+        return res;
+    }
+
     // ---------- instant YouTube playback: stream now, build the MP3 cache in the background ----------
     static string CacheDir() { var d = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TheWiredMusic", "cache"); Directory.CreateDirectory(d); return d; }
     static string IdOf(string url) { var m = Regex.Match(url ?? "", @"v=([\w-]+)"); return m.Success ? m.Groups[1].Value : null; }
@@ -524,7 +767,7 @@ class Wired : Form
     void Prefetch()
     {
         if (shuf || pl.Count < 2 || cur < 0) return; var n = pl[(cur + 1) % pl.Count]; if (n.Url == null || CachedFile(n.Url) != null) return;
-        var u = n.Url; Task.Run(async () => { try { await Resolve(u); } catch { } });
+        Task.Run(async () => { try { if (n.Spot) await RealUrl(n); await Resolve(n.Url); } catch { } });
     }
     void StartStream(string src)
     {
@@ -537,7 +780,18 @@ class Wired : Form
     }
     void Tune(int i, int my)
     {
-        var t = pl[i]; var local = CachedFile(t.Url);
+        var t = pl[i];
+        if (t.Spot && t.Url.StartsWith("ytsearch")) // Spotify song: find the matching audio first, then play it
+        {
+            St("Finding song...");
+            Task.Run(async () =>
+            {
+                try { await RealUrl(t); BeginInvoke(new Action(() => { if (my == gen && i < pl.Count && pl[i] == t) Tune(i, my); })); }
+                catch (Exception ex) { BeginInvoke(new Action(() => { if (my == gen) St("Couldn't play: " + ex.Message, 6000); })); }
+            });
+            return;
+        }
+        var local = CachedFile(t.Url);
         if (local != null) { StartStream(local); return; } // already converted: plays instantly from disk
         St("Loading...");
         Task.Run(async () =>
@@ -554,11 +808,12 @@ class Wired : Form
     // ---------- frame tick: audio analysis + animation only ----------
     void Tick()
     {
+        // song ended? advance even when minimized or hidden (this must run before the drawing early-outs below)
+        if (wo != null && playing && wo.PlaybackState == PlaybackState.Stopped) { if (rep) Play(cur); else Next(); return; }
         if (WindowState == FormWindowState.Minimized || ClientSize.Width <= 0) return;
         int now = Environment.TickCount; tickN++;
         if (statusEnd != 0 && now - statusEnd >= 0) { status = ""; statusEnd = 0; Inv(rHdr); }
         if (clrArm != 0 && now - clrArm >= 3000) { clrArm = 0; Inv(rClr); }
-        if (wo != null && playing && wo.PlaybackState == PlaybackState.Stopped) { if (rep) Play(cur); else Next(); return; }
         // save CPU: animate slower when the window is in the background or nothing is playing
         if (ActiveForm != this) { if (tickN % 3 != 0) return; } else if (!playing && tickN % 2 != 0) return;
         float dt = Math.Clamp((now - last) / 1000f, .001f, .05f); last = now;
@@ -940,6 +1195,7 @@ class Wired : Form
     protected override void OnKeyDown(KeyEventArgs e)
     {
         if (e.Control && e.KeyCode == Keys.F) { OpenSearch(); e.SuppressKeyPress = true; }
+        else if (e.Control && e.KeyCode == Keys.V && Clipboard.ContainsText() && IsSpotify(Clipboard.GetText())) AddSpotify(Clipboard.GetText().Trim());
         else if (e.Control && e.KeyCode == Keys.V && Clipboard.ContainsText() && Clipboard.GetText().Contains("youtu")) AddYt(Clipboard.GetText().Trim());
         else if (e.KeyCode == Keys.Space) { Toggle(); e.Handled = true; } else if (e.KeyCode == Keys.Right) { if (e.Control) Next(); else SeekBy(5); }
         else if (e.KeyCode == Keys.Left) { if (e.Control) Prev(); else SeekBy(-5); }
@@ -951,8 +1207,9 @@ class Wired : Form
     }
 
     // ---------- online search (YouTube via yt-dlp) ----------
-    void OpenSearch()
+    void OpenSearch(bool spot = false)
     {
+        if (spot && SpCreds().id == null && !AskSpotifyKeys()) return;
         // logical layout (scaled by DPI, same approach as the main window)
         const int DW = 680, DH = 520, PX = 20, PY = 108, PW = 640, PH = 344, RowS = 56, VY = PY + 4, VH = PH - 8;
         float u = U;
@@ -972,7 +1229,7 @@ class Wired : Form
 
         var tb = new TextBox
         {
-            BorderStyle = BorderStyle.None, BackColor = fieldBg, ForeColor = ICE2, Font = fIn, MaxLength = 120, PlaceholderText = "Search songs, artists…",
+            BorderStyle = BorderStyle.None, BackColor = fieldBg, ForeColor = ICE2, Font = fIn, MaxLength = 120, PlaceholderText = spot ? "Search Spotify songs, artists…" : "Search songs, artists…",
             Left = (int)((PX + 46) * u), Width = (int)((rClr2.X - 6 - (PX + 46)) * u)
         };
         tb.Top = (int)((rField.Y + rField.Height / 2f) * u) - tb.Height / 2;
@@ -1032,7 +1289,7 @@ class Wired : Form
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit; g.ScaleTransform(u, u);
 
             // header
-            Txt(g, "SEARCH ONLINE", fHdr, DM, PX, 15, 300);
+            Txt(g, spot ? "SEARCH SPOTIFY" : "SEARCH ONLINE", fHdr, DM, PX, 15, 300);
             Hov(g, rClose2, hv == 1, true); Ico(g, I_CLOSE, rClose2.X + 16, rClose2.Y + 16, 6, hv == 1 ? WH : TX);
 
             // search field
@@ -1110,10 +1367,10 @@ class Wired : Form
 
             // footer: status + actions
             string stx; var stc = DM;
-            if (busy) stx = "Searching YouTube…";
+            if (busy) stx = spot ? "Searching Spotify…" : "Searching YouTube…";
             else if (note.Length > 0) { stx = note; stc = ICE; }
             else if (results.Count > 0) stx = results.Count + (results.Count == 1 ? " result" : " results") + "  ·  ↑ ↓ browse  ·  Enter plays";
-            else stx = "Results from YouTube";
+            else stx = spot ? "Results from Spotify  ·  plays via YouTube" : "Results from YouTube";
             Txt(g, stx, fXs, stc, PX + 4, 477, rBPlay.X - PX - 16);
             bool en = sel >= 0 && !busy;
             Btn(g, rBPlay, "Play", I_PLAY, hv == 4, true, en); Btn(g, rBQ, "+ Queue", -1, hv == 5, false, en); Btn(g, rBDl, "Download MP3", I_DOWN, hv == 6, false, en);
@@ -1123,10 +1380,12 @@ class Wired : Form
         async Task Search()
         {
             var q = tb.Text.Trim().Replace("\"", "").Replace("\\", ""); if (q.Length == 0 || busy) return;
+            if (IsSpotify(tb.Text)) { var raw = tb.Text.Trim(); after = () => AddSpotify(raw); f.Close(); return; } // a pasted Spotify link is added, not searched
             int my = ++sgen; busy = true; note = ""; lastQ = tb.Text.Trim(); anim.Start(); surf.Invalidate();
             try
             {
-                var j = await Ytdlp($"-J --flat-playlist --no-warnings \"ytsearch12:{q}\"");
+                var j = spot ? "{}" : await Ytdlp($"-J --flat-playlist --no-warnings \"ytsearch12:{q}\"");
+                List<Track> sf = spot ? await SpSearch(lastQ) : null;
                 if (closed || my != sgen) return;
                 using var d = System.Text.Json.JsonDocument.Parse(j); results.Clear(); sel = -1; scrollY = 0; eErr = false;
                 foreach (var tbm in thumbs.Values) tbm.Dispose(); thumbs.Clear();
@@ -1138,13 +1397,14 @@ class Wired : Form
                         results.Add(YtFix(new Track { Url = "https://www.youtube.com/watch?v=" + id, Title = S(el, "title") ?? "Untitled", Artist = S(el, "channel") ?? S(el, "uploader") ?? "YouTube", Album = "YouTube",
                             Dur = el.TryGetProperty("duration", out var du) && du.ValueKind == System.Text.Json.JsonValueKind.Number ? du.GetDouble() : 0 }));
                     }
+                if (sf != null) results.AddRange(sf);
                 if (results.Count == 0) { eT = "No results"; eS = "Try different keywords"; } else sel = 0;
                 foreach (var r0 in results.ToList())
                 {
                     var tr0 = r0;
                     Task.Run(() =>
                     {
-                        var bm = LoadThumb(tr0.Url); if (bm == null) return;
+                        var bm = tr0.ArtUrl != null ? LoadArt(tr0.ArtUrl) : LoadThumb(tr0.Url); if (bm == null) return;
                         try { surf.BeginInvoke(new Action(() => { if (closed || my != sgen) { bm.Dispose(); return; } thumbs[tr0.Url] = bm; surf.Invalidate(); })); } catch { bm.Dispose(); }
                     });
                 }
@@ -1223,7 +1483,7 @@ class Wired : Form
         try
         {
             var d = new PersistData { Cur = cur, Vol = vol, Shuf = shuf, Rep = rep };
-            foreach (var t in pl) d.Tracks.Add(new PersistTrack { Url = t.Url, Path = t.Path, Title = t.Title, Artist = t.Artist, Album = t.Album, Year = t.Year, Dur = t.Dur, Saved = t.Saved });
+            foreach (var t in pl) d.Tracks.Add(new PersistTrack { Url = t.Url, Path = t.Path, Title = t.Title, Artist = t.Artist, Album = t.Album, Year = t.Year, Dur = t.Dur, Saved = t.Saved, ArtUrl = t.ArtUrl, Spot = t.Spot });
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(StateFile)); System.IO.File.WriteAllText(StateFile, System.Text.Json.JsonSerializer.Serialize(d));
         }
         catch { }
@@ -1238,7 +1498,7 @@ class Wired : Form
             for (int i = 0; i < d.Tracks.Count; i++)
             {
                 var s = d.Tracks[i]; if (s.Path != null && !System.IO.File.Exists(s.Path)) continue;
-                var t = new Track { Url = s.Url, Path = s.Path, Title = s.Title ?? "", Artist = s.Artist ?? "Unknown", Album = s.Album ?? "", Year = s.Year ?? "", Dur = s.Dur, Saved = s.Saved, Art = RandomCover() };
+                var t = new Track { Url = s.Url, Path = s.Path, Title = s.Title ?? "", Artist = s.Artist ?? "Unknown", Album = s.Album ?? "", Year = s.Year ?? "", Dur = s.Dur, Saved = s.Saved, ArtUrl = s.ArtUrl, Spot = s.Spot, Art = RandomCover() };
                 pl.Add(t); if (i == d.Cur) curT = t;
             }
             cur = curT != null ? pl.IndexOf(curT) : -1;
@@ -1321,7 +1581,9 @@ class Wired : Form
         var m = new ContextMenuStrip { BackColor = Color.FromArgb(10, 16, 22), ForeColor = TX, Font = new Font("Segoe UI", 9.5f), ShowImageMargin = false, Renderer = new ToolStripProfessionalRenderer(new DarkColors()) { RoundedEdges = false } };
         void Item(string t, Action a, bool chk = false) { var it = new ToolStripMenuItem(t) { Checked = chk, ForeColor = TX }; it.Click += (s, e) => { a(); Invalidate(); }; m.Items.Add(it); }
         void OpenDir() { using var d = new FolderBrowserDialog(); if (d.ShowDialog() == DialogResult.OK) Add(new[] { d.SelectedPath }); }
-        Item("Open files...", PickFiles); Item("Open folder...", OpenDir); Item("Search online...", OpenSearch); Item("Add YouTube link...", OpenYt); Item("Download all YouTube tracks...", () => Download(pl.ToList()));
+        Item("Open files...", PickFiles); Item("Open folder...", OpenDir); Item("Search online...", () => OpenSearch());
+        Item("Search Spotify...", () => OpenSearch(true)); Item("Add Spotify link...", () => OpenSpotify()); Item("Download from Spotify link...", () => OpenSpotify(true)); Item("Spotify keys...", () => AskSpotifyKeys());
+        Item("Add YouTube link...", OpenYt); Item("Download all online tracks...", () => Download(pl.ToList()));
         m.Items.Add(new ToolStripSeparator());
         Item("Shuffle", () => shuf = !shuf, shuf); Item("Repeat", () => rep = !rep, rep);
         m.Items.Add(new ToolStripSeparator());
