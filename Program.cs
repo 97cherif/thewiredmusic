@@ -608,10 +608,27 @@ class Wired : Form
 
     // finds the YouTube video that matches a Spotify song (closest length wins), then remembers it
     static readonly Dictionary<string, string> spMap = new();
-    static async Task<string> RealUrl(Track t)
+    // while a lookup is running, anyone else asking for the same thing (play + background warm-up) shares it instead of starting another yt-dlp
+    static readonly Dictionary<string, Task<string>> spJobs = new(), rsJobs = new();
+    static Task<string> Once(Dictionary<string, Task<string>> d, string key, Func<Task<string>> f)
     {
-        var u = t.Url; if (u == null || !u.StartsWith("ytsearch")) return u;
-        lock (spMap) if (spMap.TryGetValue(u, out var c)) { t.Url = c; return c; }
+        lock (d)
+        {
+            if (d.TryGetValue(key, out var t0)) return t0;
+            var nt = f(); d[key] = nt;
+            nt.ContinueWith(_ => { lock (d) if (d.TryGetValue(key, out var x) && x == nt) d.Remove(key); }, TaskScheduler.Default);
+            return nt;
+        }
+    }
+    static Task<string> RealUrl(Track t)
+    {
+        var u = t.Url; if (u == null || !u.StartsWith("ytsearch")) return Task.FromResult(u);
+        lock (spMap) if (spMap.TryGetValue(u, out var c)) { t.Url = c; return Task.FromResult(c); }
+        return Once(spJobs, u, () => RealUrlCore(t));
+    }
+    static async Task<string> RealUrlCore(Track t)
+    {
+        var u = t.Url;
         var q = u.Substring(u.IndexOf(':') + 1).Replace("\"", "").Replace("\\", ""); string best = null;
         for (int attempt = 0; attempt < 2 && best == null; attempt++)
         {
@@ -659,6 +676,21 @@ class Wired : Form
         var u = Ask("Paste a Spotify song, album or playlist link", "", "spotify", "Add");
         if (!string.IsNullOrEmpty(u)) AddSpotify(u);
     }
+    // looks up the YouTube audio for the first songs in the background, so pressing play is (almost) instant
+    void WarmSpotify(List<Track> ts)
+    {
+        var list = ts.Where(x => x.Spot && x.Url != null && x.Url.StartsWith("ytsearch")).Take(12).ToList(); if (list.Count == 0) return;
+        int idx = -1;
+        for (int w = 0; w < 2; w++)
+            Task.Run(async () =>
+            {
+                while (true)
+                {
+                    int i = Interlocked.Increment(ref idx); if (i >= list.Count) break;
+                    try { var yu = await RealUrl(list[i]); await Resolve(yu); } catch { }
+                }
+            });
+    }
     async void AddSpotify(string url, bool dl = false)
     {
         St("Reading Spotify link...");
@@ -667,7 +699,7 @@ class Wired : Form
             var info = await SpFetch(url); int n = 0;
             foreach (var t in info.Tracks) { t.Art = RandomCover(); pl.Add(t); n++; }
             foreach (var t in info.Tracks) Thumb(t);
-            SaveState();
+            WarmSpotify(info.Tracks); SaveState();
             St(info.Kind == "track" ? "Added 1 song" : $"Added {n} songs from {info.Name}" + (info.Kind == "playlist" && n >= 100 ? " (Spotify only shows the first 100)" : ""), 6000);
             if (cur < 0 && pl.Count > 0) Play(0); else Invalidate();
             if (dl) Download(info.Tracks);
@@ -680,9 +712,13 @@ class Wired : Form
     static string IdOf(string url) { var m = Regex.Match(url ?? "", @"v=([\w-]+)"); return m.Success ? m.Groups[1].Value : null; }
     static string CachedFile(string url) { var id = IdOf(url); if (id == null) return null; var f = System.IO.Path.Combine(CacheDir(), id + ".mp3"); return System.IO.File.Exists(f) ? f : null; }
     static readonly Dictionary<string, (string u, int t)> sc = new();
-    static async Task<string> Resolve(string url)
+    static Task<string> Resolve(string url)
     {
-        lock (sc) if (sc.TryGetValue(url, out var c) && Environment.TickCount - c.t < 1200000) return c.u;
+        lock (sc) if (sc.TryGetValue(url, out var c) && Environment.TickCount - c.t < 1200000) return Task.FromResult(c.u);
+        return Once(rsJobs, url, () => ResolveCore(url));
+    }
+    static async Task<string> ResolveCore(string url)
+    {
         string u = null;
         for (int attempt = 0; attempt < 2; attempt++)
         {
