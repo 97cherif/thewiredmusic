@@ -84,7 +84,8 @@ class Buffered : ISampleProvider, IDisposable
 class PersistTrack { public string Url { get; set; } public string Path { get; set; } public string Title { get; set; } public string Artist { get; set; } public string Album { get; set; } public string Year { get; set; } public double Dur { get; set; } public bool Saved { get; set; } public string ArtUrl { get; set; } public bool Spot { get; set; } }
 class PersistData { public List<PersistTrack> Tracks { get; set; } = new(); public int Cur { get; set; } = -1; public float Vol { get; set; } = .6f; public bool Shuf { get; set; } public bool Rep { get; set; } }
 
-class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Bitmap Art; public bool Saved, HadTitle, Real, Thumbing, Spot; public string ArtUrl; }
+class Track { public string Url, Path, Artist, Title, Album, Year = "", Lyr; public double Dur; public Bitmap Art; public bool Saved, HadTitle, Real, Thumbing, Spot, LyrOff; public string ArtUrl; public List<(double t, string s)> Sync; public int LyrSt; /* 0 idle, 1 searching, 3 not found */ }
+class LyData { public string Plain { get; set; } public string Synced { get; set; } }
 class SpInfo { public string Kind, Name, Art; public List<Track> Tracks = new(); }
 
 class Wired : Form
@@ -115,9 +116,11 @@ class Wired : Form
         sfR = new(StringFormatFlags.NoWrap) { Alignment = StringAlignment.Far, Trimming = StringTrimming.EllipsisCharacter },
         sfCC = new(StringFormatFlags.NoWrap) { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter },
         sfW = new() { Trimming = StringTrimming.None };
+    static readonly Font fLyrBig = Fn("Segoe UI Semibold", 24), fLyrM = Fn("Segoe UI", 17);
+    static readonly StringFormat sfWC = new() { Alignment = StringAlignment.Center, Trimming = StringTrimming.None };
 
     // ---------- state ----------
-    readonly List<Track> pl = new(); int cur = -1, scroll, lyrY;
+    readonly List<Track> pl = new(); int cur = -1, scroll, lyrY; float lyPos;
     WaveOutEvent wo; WaveStream rd; Buffered buf; VolumeSampleProvider vsp; Tap tap; int gen;
     bool playing, shuf, rep, mute, dragSeek, dragVol; float vol = .6f, seekFrac;
     readonly float[] bars = new float[48], spec = new float[48], snap = new float[1024], win = new float[1024];
@@ -129,7 +132,7 @@ class Wired : Form
     // ---------- layout (logical units; scaled by DPI) ----------
     float U => Math.Max(1f, DeviceDpi / 96f);
     int W = 1000, H = 620; const int RowH = 40, HdrH = 44;
-    Rectangle rHdr, rMenu, rSearch, rClr, rMin, rMax, rClose, rNow, rVis, rLyr, rPl, rList, rArt, rSeek, rVol, rTime, rBF, rBY, rDT, rDA;
+    Rectangle rHdr, rMenu, rSearch, rClr, rMin, rMax, rClose, rNow, rVis, rLyr, rLyBtn, rPl, rList, rArt, rSeek, rVol, rTime, rBF, rBY, rDT, rDA;
     readonly Rectangle[] rb = new Rectangle[6]; // 0 prev 1 play 2 next 3 repeat 4 shuffle 5 mute
     int clrArm, colX, colR, hid; Point mp = new(-1, -1);
     Bitmap bg; bool bgDirty = true; Rectangle clip;
@@ -198,7 +201,7 @@ class Wired : Form
                     if (!string.IsNullOrWhiteSpace(tf.Tag.Title)) { t.Title = tf.Tag.Title; t.HadTitle = true; }
                     t.Artist = tf.Tag.Performers.FirstOrDefault(x => !Unk(x)) ?? tf.Tag.AlbumArtists.FirstOrDefault(x => !Unk(x)) ?? tf.Tag.Composers.FirstOrDefault(x => !Unk(x));
                     t.Album = tf.Tag.Album ?? ""; t.Year = tf.Tag.Year > 0 ? tf.Tag.Year.ToString() : "";
-                    t.Dur = tf.Properties.Duration.TotalSeconds; t.Lyr = tf.Tag.Lyrics;
+                    t.Dur = tf.Properties.Duration.TotalSeconds; SetLyrics(t, tf.Tag.Lyrics);
                     if (tf.Tag.Pictures.Length > 0) { using var ms = new MemoryStream(tf.Tag.Pictures[0].Data.Data); using var im = Image.FromStream(ms); t.Art = Square(im, 320); }
                 }
                 catch { }
@@ -207,7 +210,7 @@ class Wired : Form
                 try
                 {
                     var lrc = System.IO.Path.ChangeExtension(f, ".lrc");
-                    if (string.IsNullOrWhiteSpace(t.Lyr) && System.IO.File.Exists(lrc)) t.Lyr = Regex.Replace(System.IO.File.ReadAllText(lrc), @"\[[^\]]*\]", "").Trim();
+                    if (string.IsNullOrWhiteSpace(t.Lyr) && System.IO.File.Exists(lrc)) SetLyrics(t, System.IO.File.ReadAllText(lrc));
                 }
                 catch { }
                 made.Add(t);
@@ -359,7 +362,7 @@ class Wired : Form
     void Play(int i)
     {
         if (i < 0 || i >= pl.Count) return;
-        Stop(); cur = i; ++gen; Text = $"{pl[i].Artist} - {pl[i].Title}"; lyrY = 0; posS = 0; EnsureVisible(); Relayout();
+        Stop(); cur = i; ++gen; Text = $"{pl[i].Artist} - {pl[i].Title}"; lyrY = 0; lyPos = 0; posS = 0; LoadLyCache(pl[i]); EnsureVisible(); Relayout();
         if (pl[i].Url != null) { Tune(i, gen); return; }
         try
         {
@@ -436,13 +439,13 @@ class Wired : Form
         var b = new Button { Text = t, Left = x, Top = y, Width = 110, Height = 30, FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(16, 26, 34), ForeColor = c, Font = new Font("Segoe UI", 9f), UseVisualStyleBackColor = false, Cursor = Cursors.Hand };
         b.FlatAppearance.BorderColor = Color.FromArgb(70, c.R, c.G, c.B); b.FlatAppearance.MouseOverBackColor = Color.FromArgb(26, 44, 56); return b;
     }
-    static string Ask(string title, string init = "")
+    static string Ask(string title, string init = "", string kind = null, string okText = "Add")
     {
         using var f = new Form { FormBorderStyle = FormBorderStyle.None, Size = new Size(580, 132), StartPosition = FormStartPosition.CenterParent, BackColor = Color.FromArgb(10, 16, 22), ShowInTaskbar = false };
         f.Paint += (s, e) => { e.Graphics.DrawRectangle(Pe(Al(ICE, 60), 1), 0, 0, f.Width - 1, f.Height - 1); using var fn = new Font("Segoe UI", 9.5f); e.Graphics.DrawString(title, fn, Br(DM), 16, 14); };
         var tb = new TextBox { Left = 16, Top = 44, Width = 548, BorderStyle = BorderStyle.FixedSingle, BackColor = BG, ForeColor = ICE2, Font = new Font("Segoe UI", 10.5f) };
-        tb.Text = init; if (init.Length == 0 && Clipboard.ContainsText() && (Clipboard.GetText().Contains("youtu") || Clipboard.GetText().Contains("spotify"))) tb.Text = Clipboard.GetText().Trim();
-        var ok = Flat("Add", 340, 86, ICE); ok.DialogResult = DialogResult.OK; var no = Flat("Cancel", 456, 86, TX); no.DialogResult = DialogResult.Cancel;
+        tb.Text = init; if (init.Length == 0 && Clipboard.ContainsText() && (kind == null ? (Clipboard.GetText().Contains("youtu") || Clipboard.GetText().Contains("spotify")) : Clipboard.GetText().Contains(kind))) tb.Text = Clipboard.GetText().Trim();
+        var ok = Flat(okText, 340, 86, ICE); ok.DialogResult = DialogResult.OK; var no = Flat("Cancel", 456, 86, TX); no.DialogResult = DialogResult.Cancel;
         f.Controls.Add(tb); f.Controls.Add(ok); f.Controls.Add(no); f.AcceptButton = ok; f.CancelButton = no; f.Shown += (s, e) => { tb.Focus(); tb.SelectAll(); };
         return f.ShowDialog() == DialogResult.OK ? tb.Text.Trim() : null;
     }
@@ -494,7 +497,7 @@ class Wired : Form
         if (dlCancel) { try { foreach (var f in Directory.GetFiles(d.SelectedPath)) if ((f.EndsWith(".part") || f.EndsWith(".ytdl")) && System.IO.File.GetLastWriteTime(f) >= t0.AddSeconds(-2)) System.IO.File.Delete(f); } catch { } }
         dlBusy = false; dlProc = null; St(dlCancel ? $"Stopped - {ok} song(s) kept" : $"Downloaded {ok}/{list.Count}", 6000); Invalidate();
     }
-    void OpenYt() { var u = Ask("Paste a YouTube video or playlist link"); if (!string.IsNullOrEmpty(u)) { if (IsSpotify(u)) AddSpotify(u); else AddYt(u); } }
+    void OpenYt() { var u = Ask("Paste a YouTube video or playlist link", "", "youtu"); if (string.IsNullOrEmpty(u)) return; if (IsSpotify(u)) St("That is a Spotify link - use Add Spotify link", 5000); else AddYt(u); }
     async void AddYt(string url)
     {
         St("Connecting...");
@@ -653,7 +656,7 @@ class Wired : Form
     }
     void OpenSpotify(bool dl = false)
     {
-        var u = Ask(dl ? "Paste a Spotify song, album or playlist link to download" : "Paste a Spotify song, album or playlist link");
+        var u = Ask(dl ? "Paste a Spotify song, album or playlist link to download" : "Paste a Spotify song, album or playlist link", "", "spotify", dl ? "Download" : "Add");
         if (!string.IsNullOrEmpty(u)) AddSpotify(u, dl);
     }
     async void AddSpotify(string url, bool dl = false)
@@ -867,9 +870,7 @@ class Wired : Form
         int lw = rPl.X - 16 - pad;
         rNow = new Rectangle(pad, top, lw, 182);
         int vy = rNow.Bottom + 16, vh = Math.Max(80, H - pad - vy);
-        bool hl = cur >= 0 && cur < pl.Count && !string.IsNullOrWhiteSpace(pl[cur].Lyr) && lw >= 640;
-        if (hl) { int w2 = (int)(lw * .36f); rVis = new Rectangle(pad, vy, lw - w2 - 16, vh); rLyr = new Rectangle(rVis.Right + 16, vy, w2, vh); }
-        else { rVis = new Rectangle(pad, vy, lw, vh); rLyr = Rectangle.Empty; }
+        rVis = new Rectangle(pad, vy, lw, vh); rLyr = Rectangle.Empty; rLyBtn = new Rectangle(rVis.Right - 16 - 132, rVis.Y + 14, 132, 28);
         rArt = new Rectangle(rNow.X + 16, rNow.Y + 16, 150, 150);
         colX = rArt.Right + 22; colR = rNow.Right - 22;
         rSeek = new Rectangle(colX, rNow.Y + 100, Math.Max(10, colR - colX), 4);
@@ -1082,7 +1083,146 @@ class Wired : Form
         }
         int ba = 36 + (int)(avg * 90);
         for (int i = 0; i < bx.Length; i++) { float x = r.X + bx[i] * r.Width + (float)Math.Sin(t * .7f + bph[i]) * 6, y = r.Y + by[i] * r.Height; if (y > y0 + 6) g.DrawEllipse(Pe(Al(ICE2, ba), 1f), x, y, bsz[i], bsz[i]); }
+        DrawLyrics(g, r);
         g.Restore(st);
+        DrawLyBtn(g);
+    }
+
+    // ---------- lyrics (searched only when you press "Search lyrics"; free LRCLIB database, no login) ----------
+    static readonly Regex LrcTag = new(@"\[(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)\]");
+    static List<(double t, string s)> ParseLrc(string lrc)
+    {
+        var res = new List<(double t, string s)>();
+        foreach (var raw in (lrc ?? "").Split('\n'))
+        {
+            var line = raw.Trim('\r', ' '); var ms = LrcTag.Matches(line); if (ms.Count == 0) continue;
+            var text = LrcTag.Replace(line, "").Trim();
+            foreach (Match m in ms) res.Add((int.Parse(m.Groups[1].Value) * 60 + double.Parse(m.Groups[2].Value.Replace(':', '.'), System.Globalization.CultureInfo.InvariantCulture), text));
+        }
+        res.Sort((x, y) => x.t.CompareTo(y.t)); return res;
+    }
+    static void SetLyrics(Track t, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+        var sy = ParseLrc(text);
+        if (sy.Count >= 3) { t.Sync = sy; t.Lyr = string.Join("\n", sy.Select(x => x.s)); }
+        else t.Lyr = Regex.Replace(text, @"\[[^\]]*\]", "").Trim();
+    }
+    static void ApplyLyrics(Track t, string plain, string synced)
+    {
+        if (!string.IsNullOrWhiteSpace(synced)) SetLyrics(t, synced);
+        if (t.Sync == null && !string.IsNullOrWhiteSpace(plain)) t.Lyr = plain.Trim();
+    }
+    static int LS(Track t) => (!string.IsNullOrWhiteSpace(t.Lyr) || t.Sync != null) ? 2 : t.LyrSt;
+    static bool LyrShown(Track t) => LS(t) == 2 && !t.LyrOff;
+    static string LyCache(Track t) => System.IO.Path.Combine(CacheDir(), "ly_" + Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(((t.Artist ?? "") + "|" + (t.Title ?? "")).ToLowerInvariant()))).Substring(0, 16) + ".json");
+    static void LoadLyCache(Track t)
+    {
+        if (LS(t) == 2) return;
+        try
+        {
+            var f = LyCache(t); if (!System.IO.File.Exists(f)) return;
+            var d = JsonSerializer.Deserialize<LyData>(System.IO.File.ReadAllText(f)); if (d != null) ApplyLyrics(t, d.Plain, d.Synced);
+        }
+        catch { }
+    }
+    static string LyClean(string s)
+    {
+        s = Regex.Replace(s ?? "", @"\s*[\(\[][^\)\]]*(feat|ft\.|with|remaster|live|version|edit|mix|official|lyric|audio|video)[^\)\]]*[\)\]]", "", RegexOptions.IgnoreCase);
+        s = Regex.Replace(s, @"\s+-\s+(remaster|live|.*version|.*mix|.*edit).*$", "", RegexOptions.IgnoreCase);
+        return s.Trim();
+    }
+    static (string p, string s) BestLy(JsonElement arr, double dur, double maxDiff)
+    {
+        (string p, string s) best = (null, null); int bs = -1;
+        if (arr.ValueKind != JsonValueKind.Array) return best;
+        foreach (var e in arr.EnumerateArray())
+        {
+            string p = JStr(e, "plainLyrics"), s = JStr(e, "syncedLyrics"); if (string.IsNullOrWhiteSpace(p) && string.IsNullOrWhiteSpace(s)) continue;
+            double du = JNum(e, "duration"); if (dur > 0 && du > 0 && Math.Abs(du - dur) > maxDiff) continue;
+            int sc2 = (string.IsNullOrWhiteSpace(s) ? 0 : 2) + (dur > 0 && du > 0 && Math.Abs(du - dur) <= 3 ? 1 : 0);
+            if (sc2 > bs) { bs = sc2; best = (p, s); }
+        }
+        return best;
+    }
+    static async Task<(string plain, string synced)> FetchLyrics(Track t)
+    {
+        using var h = new HttpClient { Timeout = TimeSpan.FromSeconds(15) }; h.DefaultRequestHeaders.UserAgent.ParseAdd("TheWiredMusic/1.0");
+        string artist = (t.Artist ?? "").Trim(), title = (t.Title ?? "").Trim();
+        if (Unk(artist) || artist == "YouTube" || artist == "Spotify") artist = "";
+        bool alb = !string.IsNullOrWhiteSpace(t.Album) && t.Album != "YouTube" && t.Album != "Spotify";
+        string E(string v) => Uri.EscapeDataString(v);
+        async Task<JsonDocument> Get(string url) { try { var r = await h.GetAsync(url); if (!r.IsSuccessStatusCode) return null; return JsonDocument.Parse(await r.Content.ReadAsStringAsync()); } catch { return null; } }
+        if (artist.Length > 0 && title.Length > 0) // exact match first (artist + title + album + length)
+        {
+            using var d1 = await Get("https://lrclib.net/api/get?artist_name=" + E(artist) + "&track_name=" + E(title) + (alb ? "&album_name=" + E(t.Album) : "") + (t.Dur > 0 ? "&duration=" + (int)Math.Round(t.Dur) : ""));
+            if (d1 != null) { var p1 = JStr(d1.RootElement, "plainLyrics"); var s1 = JStr(d1.RootElement, "syncedLyrics"); if (!string.IsNullOrWhiteSpace(p1) || !string.IsNullOrWhiteSpace(s1)) return (p1, s1); }
+        }
+        var ct = LyClean(title); var urls = new List<string>();
+        if (artist.Length > 0) urls.Add("https://lrclib.net/api/search?track_name=" + E(ct) + "&artist_name=" + E(artist));
+        urls.Add("https://lrclib.net/api/search?q=" + E((artist + " " + ct).Trim()));
+        foreach (var u in urls)
+        {
+            using var d = await Get(u); if (d == null) continue;
+            var b = BestLy(d.RootElement, t.Dur, u.Contains("track_name") ? 30 : 12);
+            if (!string.IsNullOrWhiteSpace(b.p) || !string.IsNullOrWhiteSpace(b.s)) return b;
+        }
+        return (null, null);
+    }
+    async void SearchLyrics(Track t)
+    {
+        if (t.LyrSt == 1) return; t.LyrSt = 1; t.LyrOff = false; Inv(rVis);
+        try
+        {
+            var (p, sy) = await FetchLyrics(t);
+            if (string.IsNullOrWhiteSpace(p) && string.IsNullOrWhiteSpace(sy)) t.LyrSt = 3;
+            else
+            {
+                ApplyLyrics(t, p, sy); t.LyrSt = 2; lyrY = 0; lyPos = 0;
+                try { System.IO.File.WriteAllText(LyCache(t), JsonSerializer.Serialize(new LyData { Plain = p, Synced = sy })); } catch { }
+            }
+        }
+        catch { t.LyrSt = 3; }
+        Inv(rVis);
+    }
+    void LyrClick()
+    {
+        if (cur < 0 || cur >= pl.Count) return; var t = pl[cur]; int st = LS(t);
+        if (st == 2) { t.LyrOff = !t.LyrOff; lyrY = 0; } else if (st != 1) SearchLyrics(t);
+        Inv(rVis);
+    }
+    void DrawLyBtn(Graphics g)
+    {
+        if (cur < 0 || cur >= pl.Count || rLyBtn.IsEmpty) return; var T = pl[cur]; int st = LS(T);
+        Pill(g, rLyBtn, st == 1 ? "Searching..." : st == 2 ? (T.LyrOff ? "Show lyrics" : "Hide lyrics") : st == 3 ? "Not found - retry" : "Search lyrics", hid == 30, st == 2 && !T.LyrOff);
+    }
+    // drawn on top of the visualiser, inside its clip
+    void DrawLyrics(Graphics g, Rectangle r)
+    {
+        var T = cur >= 0 && cur < pl.Count ? pl[cur] : null; if (T == null || !LyrShown(T)) return;
+        g.FillRectangle(Br(Al(BG, 150)), r);
+        if (T.Sync != null && T.Sync.Count > 0)
+        {
+            var sy = T.Sync; int idx = -1; double ps = posS + .1;
+            for (int i = 0; i < sy.Count; i++) { if (sy[i].t <= ps) idx = i; else break; }
+            lyPos += (idx - lyPos) * .16f; if (Math.Abs(idx - lyPos) < .002f) lyPos = idx;
+            float cy = r.Y + r.Height * .5f, step = 40, rw = r.Width - 60;
+            for (int k = Math.Max(0, (int)Math.Floor(lyPos) - 4); k <= Math.Min(sy.Count - 1, (int)Math.Ceiling(lyPos) + 4); k++)
+            {
+                float y = cy + (k - lyPos) * step, dist = Math.Abs(k - lyPos); if (y < r.Y - 20 || y > r.Bottom + 20) continue;
+                bool on = k == idx; var txt = string.IsNullOrWhiteSpace(sy[k].s) ? "♪" : sy[k].s;
+                int a = on ? 255 : (int)Math.Clamp(190 - dist * 55, 0, 190);
+                var f = on && g.MeasureString(txt, fLyrBig).Width <= rw ? fLyrBig : fLyrM;
+                var rc = new RectangleF(r.X + 30, y - 20, rw, 40);
+                if (on) TxtIn(g, txt, f, Al(BG, 200), new RectangleF(rc.X + 1, rc.Y + 2, rc.Width, rc.Height), sfCC);
+                TxtIn(g, txt, f, on ? Al(WH, a) : Al(TX, a), rc, sfCC);
+            }
+        }
+        else
+        {
+            var st2 = g.Save(); g.SetClip(new Rectangle(r.X + 2, r.Y + 48, r.Width - 4, r.Height - 50), CombineMode.Intersect);
+            g.DrawString(T.Lyr, fLyrM, Br(Al(TX, 230)), new RectangleF(r.X + 30, r.Y + 56 - lyrY, r.Width - 60, 6000), sfWC); g.Restore(st2);
+        }
     }
 
     void DrawLyr(Graphics g)
@@ -1139,6 +1279,7 @@ class Wired : Form
         for (int i = 0; i < 6; i++) if (rb[i].Contains(p)) return 10 + i;
         if (rBF.Contains(p)) return 20; if (rBY.Contains(p)) return 21; if (rDT.Contains(p)) return 22; if (rDA.Contains(p)) return 23;
         if (pl.Count > 0 && rClr.Contains(p)) return 24;
+        if (cur >= 0 && cur < pl.Count && rLyBtn.Contains(p)) return 30;
         if (rList.Contains(p)) { int k = scroll + (p.Y - rList.Y) / RowH; if (k < pl.Count) return (pl[k].Url != null && p.X > rList.Right - 12 - 40 - 28 && p.X < rList.Right - 12 - 40) ? 200000 + k : 100000 + k; }
         return 0;
     }
@@ -1161,6 +1302,7 @@ class Wired : Form
             case 3: Close(); return;
             case 4: ShowMenu(); return;
             case 5: OpenSearch(); return;
+            case 30: LyrClick(); return;
             case 24: if (clrArm != 0 && Environment.TickCount - clrArm < 3000) { clrArm = 0; ClearAll(); } else clrArm = Environment.TickCount; Invalidate(); return;
             case 17: dragSeek = true; SeekTo(p.X); Inv(rNow); return;
             case 16: dragVol = true; SetVol(p.X); Inv(rNow); return;
@@ -1186,10 +1328,10 @@ class Wired : Form
     {
         var p = V(e.Location);
         if (rPl.Contains(p)) { scroll = Math.Clamp(scroll - Math.Sign(e.Delta) * 3, 0, Math.Max(0, pl.Count - Rows)); Invalidate(); }
-        else if (!rLyr.IsEmpty && rLyr.Contains(p) && cur >= 0)
+        else if (rVis.Contains(p) && cur >= 0 && cur < pl.Count && LyrShown(pl[cur]) && pl[cur].Sync == null)
         {
-            using var gg = CreateGraphics(); float need = gg.MeasureString(pl[cur].Lyr ?? "", fLyr, (int)((rLyr.Width - 40) * U), sfW).Height / U;
-            lyrY = (int)Math.Clamp(lyrY - Math.Sign(e.Delta) * 40, 0, Math.Max(0, need - rLyr.Height + 40)); Inv(rLyr);
+            using var gg = CreateGraphics(); gg.ScaleTransform(U, U); float need = gg.MeasureString(pl[cur].Lyr ?? "", fLyrM, rVis.Width - 60, sfWC).Height;
+            lyrY = (int)Math.Clamp(lyrY - Math.Sign(e.Delta) * 50, 0, Math.Max(0, need - (rVis.Height - 70) + 24)); Inv(rVis);
         }
     }
     protected override void OnKeyDown(KeyEventArgs e)
@@ -1199,7 +1341,7 @@ class Wired : Form
         else if (e.Control && e.KeyCode == Keys.V && Clipboard.ContainsText() && Clipboard.GetText().Contains("youtu")) AddYt(Clipboard.GetText().Trim());
         else if (e.KeyCode == Keys.Space) { Toggle(); e.Handled = true; } else if (e.KeyCode == Keys.Right) { if (e.Control) Next(); else SeekBy(5); }
         else if (e.KeyCode == Keys.Left) { if (e.Control) Prev(); else SeekBy(-5); }
-        else if (e.KeyCode == Keys.N) Next(); else if (e.KeyCode == Keys.P) Prev();
+        else if (e.KeyCode == Keys.L) LyrClick(); else if (e.KeyCode == Keys.N) Next(); else if (e.KeyCode == Keys.P) Prev();
         else if (e.KeyCode == Keys.Up) { vol = Math.Min(1, vol + .05f); mute = false; Vol(); }
         else if (e.KeyCode == Keys.Down) { vol = Math.Max(0, vol - .05f); Vol(); }
         else if (e.KeyCode == Keys.M) { mute = !mute; Vol(); } else if (e.KeyCode == Keys.S) shuf = !shuf; else if (e.KeyCode == Keys.R) rep = !rep;
@@ -1229,7 +1371,7 @@ class Wired : Form
 
         var tb = new TextBox
         {
-            BorderStyle = BorderStyle.None, BackColor = fieldBg, ForeColor = ICE2, Font = fIn, MaxLength = 120, PlaceholderText = spot ? "Search Spotify songs, artists…" : "Search songs, artists…",
+            BorderStyle = BorderStyle.None, BackColor = fieldBg, ForeColor = ICE2, Font = fIn, MaxLength = 120, PlaceholderText = spot ? "Search Spotify songs, artists…" : "Search YouTube songs, artists…",
             Left = (int)((PX + 46) * u), Width = (int)((rClr2.X - 6 - (PX + 46)) * u)
         };
         tb.Top = (int)((rField.Y + rField.Height / 2f) * u) - tb.Height / 2;
@@ -1289,7 +1431,7 @@ class Wired : Form
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit; g.ScaleTransform(u, u);
 
             // header
-            Txt(g, spot ? "SEARCH SPOTIFY" : "SEARCH ONLINE", fHdr, DM, PX, 15, 300);
+            Txt(g, spot ? "SEARCH SPOTIFY" : "SEARCH YOUTUBE", fHdr, DM, PX, 15, 300);
             Hov(g, rClose2, hv == 1, true); Ico(g, I_CLOSE, rClose2.X + 16, rClose2.Y + 16, 6, hv == 1 ? WH : TX);
 
             // search field
@@ -1380,7 +1522,7 @@ class Wired : Form
         async Task Search()
         {
             var q = tb.Text.Trim().Replace("\"", "").Replace("\\", ""); if (q.Length == 0 || busy) return;
-            if (IsSpotify(tb.Text)) { var raw = tb.Text.Trim(); after = () => AddSpotify(raw); f.Close(); return; } // a pasted Spotify link is added, not searched
+            if (IsSpotify(tb.Text)) { if (!spot) { note = "That is a Spotify link - use Search Spotify or Add Spotify link"; surf.Invalidate(); return; } var raw = tb.Text.Trim(); after = () => AddSpotify(raw); f.Close(); return; }
             int my = ++sgen; busy = true; note = ""; lastQ = tb.Text.Trim(); anim.Start(); surf.Invalidate();
             try
             {
@@ -1519,7 +1661,7 @@ class Wired : Form
                 {
                     using var tf = TagLib.File.Create(t.Path); string ly = tf.Tag.Lyrics; Bitmap bm = null;
                     if (tf.Tag.Pictures.Length > 0) { using var ms = new MemoryStream(tf.Tag.Pictures[0].Data.Data); using var im = Image.FromStream(ms); bm = Square(im, 320); }
-                    bm ??= FolderArt(t.Path); BeginInvoke(new Action(() => { t.Lyr = ly; if (bm != null) { t.Art = bm; t.Real = true; if (artFor == t) artFor = null; } Invalidate(); }));
+                    bm ??= FolderArt(t.Path); BeginInvoke(new Action(() => { if (!string.IsNullOrWhiteSpace(ly)) SetLyrics(t, ly); if (bm != null) { t.Art = bm; t.Real = true; if (artFor == t) artFor = null; } Invalidate(); }));
                 }
                 catch { }
             }
@@ -1581,9 +1723,13 @@ class Wired : Form
         var m = new ContextMenuStrip { BackColor = Color.FromArgb(10, 16, 22), ForeColor = TX, Font = new Font("Segoe UI", 9.5f), ShowImageMargin = false, Renderer = new ToolStripProfessionalRenderer(new DarkColors()) { RoundedEdges = false } };
         void Item(string t, Action a, bool chk = false) { var it = new ToolStripMenuItem(t) { Checked = chk, ForeColor = TX }; it.Click += (s, e) => { a(); Invalidate(); }; m.Items.Add(it); }
         void OpenDir() { using var d = new FolderBrowserDialog(); if (d.ShowDialog() == DialogResult.OK) Add(new[] { d.SelectedPath }); }
-        Item("Open files...", PickFiles); Item("Open folder...", OpenDir); Item("Search online...", () => OpenSearch());
+        Item("Open files...", PickFiles); Item("Open folder...", OpenDir);
+        m.Items.Add(new ToolStripSeparator());
+        Item("Search YouTube...", () => OpenSearch()); Item("Add YouTube link...", OpenYt);
+        m.Items.Add(new ToolStripSeparator());
         Item("Search Spotify...", () => OpenSearch(true)); Item("Add Spotify link...", () => OpenSpotify()); Item("Download from Spotify link...", () => OpenSpotify(true)); Item("Spotify keys...", () => AskSpotifyKeys());
-        Item("Add YouTube link...", OpenYt); Item("Download all online tracks...", () => Download(pl.ToList()));
+        m.Items.Add(new ToolStripSeparator());
+        Item("Download all online tracks...", () => Download(pl.ToList()));
         m.Items.Add(new ToolStripSeparator());
         Item("Shuffle", () => shuf = !shuf, shuf); Item("Repeat", () => rep = !rep, rep);
         m.Items.Add(new ToolStripSeparator());
